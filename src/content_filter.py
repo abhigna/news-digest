@@ -56,6 +56,41 @@ def evaluate_content(article_content, article_metadata):
     max_content_chars = 6000
     truncated_content = article_content[:max_content_chars] + "..." if len(article_content) > max_content_chars else article_content
     
+    # Get disagreement examples if enabled in config
+    examples_text = ""
+    if EVALUATION_CONFIG.get("include_feedback_examples", False):
+        examples_count = EVALUATION_CONFIG.get("examples_count", 2)
+        if examples_count > 0:
+            # Initialize the evaluation system
+            eval_system = EvaluationSystem(EVALUATION_CONFIG)
+            
+            # Get disagreement examples
+            disagreement_examples = eval_system.get_disagreement_examples(
+                use_case='content_filter',
+                count=examples_count
+            )
+            
+            if disagreement_examples:
+                examples_text = "\nHUMAN FEEDBACK EXAMPLES (where previous model evaluations were incorrect):\n"
+                
+                for i, example in enumerate(disagreement_examples, 1):
+                    item_meta = example.get('item_metadata', {})
+                    model_result = example.get('evaluation_result', {})
+                    
+                    examples_text += f"Example {i}:\n"
+                    examples_text += f"Title: {item_meta.get('title', 'Unknown')}\n"
+                    examples_text += f"Model decision: {'PASS' if model_result.get('pass_filter', False) else 'FAIL'}\n"
+                    examples_text += f"Human decision: {'PASS' if example.get('human_decision', False) else 'FAIL'}\n"
+                    
+                    if example.get('human_notes'):
+                        examples_text += f"Human notes: {example.get('human_notes')}\n"
+                    
+                    content_snippet = example.get('additional_data', {}).get('content_snippet', '')
+                    if content_snippet:
+                        examples_text += f"Content snippet: {content_snippet}\n"
+                    
+                    examples_text += f"Reason for model error: The model failed to correctly assess whether this article matched the user's interests.\n\n"
+    
     prompt = f"""
 You are a content filtering system for a personalized tech news digest.
 
@@ -65,7 +100,7 @@ The user is specifically interested in:
 
 The user is NOT interested in:
 {excluded_interests_text}
-
+{examples_text}
 ARTICLE TO EVALUATE:
 Title: {title}
 Source: {source}

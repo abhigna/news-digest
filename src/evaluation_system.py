@@ -4,6 +4,7 @@ import logging
 import uuid
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Literal
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -275,3 +276,41 @@ class EvaluationSystem:
         except Exception as e:
             logger.error(f"Error saving evaluation: {e}")
             return False
+    
+    def get_disagreement_examples(self, 
+                                 use_case: str,
+                                 count: int = 2,
+                                 days: int = 90) -> List[Dict]:
+        """
+        Get examples where human and model evaluations disagreed.
+        
+        Args:
+            use_case: Filter by use case (e.g., 'content_filter')
+            count: Number of examples to return
+            days: Look back this many days for examples
+            
+        Returns:
+            list: Examples with human-model disagreement
+        """
+        # Get human-validated evaluations for the use case
+        validated_evals = self.get_evaluations(
+            use_case=use_case,
+            days=days,
+            human_validated_only=True
+        )
+        
+        # Filter for disagreements
+        disagreements = []
+        for eval_entry in validated_evals:
+            model_decision = eval_entry.get('evaluation_result', {}).get('pass_filter', False)
+            human_decision = eval_entry.get('human_decision', False)
+            
+            # If there's a disagreement
+            if model_decision != human_decision:
+                disagreements.append(eval_entry)
+        
+        # Randomly select examples
+        if len(disagreements) <= count:
+            return disagreements
+        else:
+            return random.sample(disagreements, count)

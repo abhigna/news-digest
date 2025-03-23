@@ -68,6 +68,8 @@ EVALUATION_CONFIG = {
     "evaluation_logs_directory": "evaluation_logs",
     "default_days_to_display": 30,
     "required_agreement_rate": 0.8,  # Target agreement rate between model and human
+    "include_feedback_examples": True,  # Whether to include human feedback examples in prompts
+    "examples_count": 2  # Number of human feedback examples to include
 }
 
 FILTERING_CONFIG = {
