@@ -13,9 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Define the structured output model
 class ArticleSummary(BaseModel):
-    summary: str = Field(description="A concise summary of the article")
-    key_points: List[str] = Field(description="Key technical takeaways from the article")
-    technical_details: List[str] = Field(description="Specific technologies, frameworks, or technical specifications mentioned")
+    summary: str = Field(description="A concise summary of the article with the main subject italicized")
 
 def summarize_article(article_content, article_metadata, evaluation_info):
     """
@@ -27,7 +25,7 @@ def summarize_article(article_content, article_metadata, evaluation_info):
         evaluation_info: Information about article evaluation (topics, pass/fail)
         
     Returns:
-        dict: Contains summary, key points, and technical details
+        dict: Contains the summary with main subject italicized
     """
     # Extract relevant metadata
     title = article_metadata.get("title", "")
@@ -42,7 +40,6 @@ def summarize_article(article_content, article_metadata, evaluation_info):
     max_content_chars = 6000
     truncated_content = article_content[:max_content_chars] + "..." if len(article_content) > max_content_chars else article_content
     
-    key_points_count = SUMMARIZATION_CONFIG["include_key_points"]
     max_length = SUMMARIZATION_CONFIG["max_summary_length"]
     
     prompt = f"""
@@ -56,13 +53,16 @@ Topics: {topics_str}
 Content: {truncated_content}
 
 TASK:
-Create a concise technical summary of this article with these components:
+Create a concise technical summary of this article:
 
-1. Summary: A {max_length}-word summary that captures the main technological points and significance to developers. Focus on technical details, tools, frameworks, or concepts mentioned.
+Summary: Write a direct, crisp {max_length}-word summary that captures the main technological points and significance to developers. Focus on technical details, tools, frameworks, or concepts mentioned.
 
-2. Key Points: Extract exactly {key_points_count} key technical takeaways from the article, formatted as bullet points.
-
-3. Technical Details: If the article mentions specific technologies, programming languages, frameworks, APIs, or technical specifications, list them briefly.
+IMPORTANT GUIDELINES:
+1. Start immediately with the key information - avoid phrases like "The article explores", "This article discusses", etc.
+2. Use active voice and direct language throughout.
+3. Italicize the main subject/sentence by surrounding it with asterisks (*like this*).
+4. Focus on what developers need to know, not on describing the article itself.
+5. Be specific about technologies, tools, methods, or frameworks mentioned.
 """
 
     # Initialize OpenAI client with OpenRouter base URL and API key
@@ -91,16 +91,12 @@ Create a concise technical summary of this article with these components:
     except requests.exceptions.RequestException as e:
         logger.error(f"API request failed: {e}")
         return {
-            'summary': f"Error: {str(e)}",
-            'key_points': [],
-            'technical_details': []
+            'summary': f"Error: {str(e)}"
         }
     except Exception as e:
         logger.error(f"Error in summarization: {e}")
         return {
-            'summary': f"Error: {str(e)}",
-            'key_points': [],
-            'technical_details': []
+            'summary': f"Error: {str(e)}"
         }
 
 def summarize_selected_articles(selected_articles):

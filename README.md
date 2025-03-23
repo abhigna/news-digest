@@ -111,14 +111,6 @@ You can limit to recent articles with the `--days` parameter:
 python src/cli.py --filter --days 1
 ```
 
-### Summarizing Articles
-
-To generate summaries for filtered articles:
-
-```bash
-python src/cli.py --summarize
-```
-
 ### Compiling a Digest
 
 To create a final digest as a Markdown file:
@@ -131,14 +123,6 @@ For recent articles only:
 
 ```bash
 python src/cli.py --compile --days 1
-```
-
-### Running the Full Pipeline
-
-To execute all steps (collect, filter, summarize, compile) at once:
-
-```bash
-python src/cli.py --run-all
 ```
 
 ### Using the Evaluation App
