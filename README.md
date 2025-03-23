@@ -1,4 +1,27 @@
-# News Digest System
+Yes, you can make your README more navigatable on GitHub by adding a table of contents and using anchor links. This will help users quickly jump to different sections of the document. Here's how you can enhance your README:
+
+# Tech News Digest System
+
+A personal tool for creating customized tech news digests based on your specific interests.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [System Architecture](#system-architecture)
+- [Setup Instructions](#setup-instructions)
+  - [Prerequisites](#prerequisites)
+  - [Initial Setup](#initial-setup)
+- [Usage](#usage)
+  - [Collecting Articles](#collecting-articles)
+  - [Compiling a Digest](#compiling-a-digest)
+  - [Using the Evaluation App](#using-the-evaluation-app)
+- [Customization](#customization)
+  - [Configuring Interests](#configuring-interests)
+  - [Scheduling Automatic Updates](#scheduling-automatic-updates)
+  - [Model Configuration](#model-configuration)
+- [Output](#output)
+
+## Overview
 
 This repository contains a personal tool for creating customized tech news digests that match your specific interests. While it currently uses Hacker News as its source, it's designed to be expandable to other news sources.
 
@@ -164,7 +187,7 @@ To automate daily collection of articles, set up a cron job:
 0 7 * * * cd /path/to/news-digest && python src/cli.py --compile --days 1
 ```
 
-## Model Configuration
+### Model Configuration
 
 The system uses OpenRouter for access to different AI models. You can configure the model in `config.py`:
 
