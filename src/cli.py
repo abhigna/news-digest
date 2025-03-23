@@ -67,13 +67,40 @@ def filter_articles(use_cache=True, days=None):
     logger.info("Starting content filtering...")
     
     try:
-        from content_filter import filter_articles
+        # Import the required classes and configurations
+        from llm_gateway import LlmGateway
+        from content_filter import ContentFilter
+        from judge_system import JudgeSystem
+        from config import FILTERING_CONFIG, OPENROUTER_CONFIG, INTERESTS, COLLECTION_CONFIG, JUDGE_CONFIG
+        
+        # Initialize the LLM gateway
+        llm_gateway = LlmGateway(
+            llm_config=OPENROUTER_CONFIG,
+            use_case='content_filter', 
+            cache_dir=FILTERING_CONFIG.get('llm_cache', 'llm_cache')
+        )
+        
+        # Initialize the judge system (for feedback examples)
+        judge_system = JudgeSystem(JUDGE_CONFIG)
+        
+        # Initialize the content filter
+        content_filter = ContentFilter(
+            filter_config=FILTERING_CONFIG,
+            llm_gateway=llm_gateway,
+            interests=INTERESTS,
+            judge_system=judge_system
+        )
+        
+        # Run the filtering
         articles_dir = COLLECTION_CONFIG['articles_directory']
-        selected_articles = filter_articles(articles_dir, use_cache=use_cache, days=days)
+        selected_articles = content_filter.filter_articles(articles_dir, use_cache=use_cache, days=days)
+        
         logger.info(f"Selected {len(selected_articles)} articles")
         return selected_articles
     except Exception as e:
         logger.error(f"Content filtering failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return []
 
 def summarize_articles(selected_articles):
@@ -85,12 +112,37 @@ def summarize_articles(selected_articles):
     logger.info(f"Summarizing {len(selected_articles)} articles...")
     
     try:
-        from content_summarizer import summarize_selected_articles
-        summarized_articles = summarize_selected_articles(selected_articles)
+        # Import required classes and configurations
+        from llm_gateway import LlmGateway
+        from content_summarizer import ContentSummarizer
+        from judge_system import JudgeSystem
+        from config import SUMMARIZATION_CONFIG, OPENROUTER_CONFIG, JUDGE_CONFIG
+        
+        # Initialize the LLM gateway
+        llm_gateway = LlmGateway(
+            llm_config=OPENROUTER_CONFIG,
+            use_case='content_summarizer', 
+            cache_dir=SUMMARIZATION_CONFIG.get('llm_cache', 'llm_cache')
+        )
+        
+        # Initialize the judge system
+        judge_system = JudgeSystem(JUDGE_CONFIG)
+        
+        # Initialize the content summarizer
+        content_summarizer = ContentSummarizer(
+            summarization_config=SUMMARIZATION_CONFIG,
+            llm_gateway=llm_gateway,
+            judge_system=judge_system
+        )
+        
+        # Run the summarization
+        summarized_articles = content_summarizer.summarize_selected_articles(selected_articles)
         logger.info(f"Summarized {len(summarized_articles)} articles")
         return summarized_articles
     except Exception as e:
         logger.error(f"Content summarization failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return []
 
 def compile_digest(summarized_articles):
@@ -102,57 +154,35 @@ def compile_digest(summarized_articles):
     logger.info("Compiling digest...")
     
     try:
-        from digest_compiler import compile_digest, print_digest_to_console
-        digest_file = compile_digest(summarized_articles)
+        # Import required classes and configurations
+        from digest_compiler import DigestCompiler
+        from judge_system import JudgeSystem
+        from config import DIGEST_CONFIG, JUDGE_CONFIG
+        
+        # Initialize the judge system
+        judge_system = JudgeSystem(JUDGE_CONFIG)
+        
+        # Initialize the digest compiler
+        digest_compiler = DigestCompiler(
+            digest_config=DIGEST_CONFIG,
+            judge_system=judge_system
+        )
+        
+        # Compile the digest
+        digest_file = digest_compiler.compile_digest(summarized_articles)
         
         if digest_file:
             logger.info(f"Digest compiled successfully: {digest_file}")
-            print_digest_to_console(digest_file)
+            digest_compiler.print_digest_to_console(digest_file)
             return digest_file
         else:
             logger.error("Failed to compile digest")
             return None
     except Exception as e:
         logger.error(f"Digest compilation failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
-
-def run_full_pipeline():
-    """Run the complete pipeline from data collection to digest compilation."""
-    logger.info("Starting tech news digest pipeline...")
-    
-    # Get days parameter if specified
-    days_filter = None
-    if len(sys.argv) > 2 and sys.argv[1] == "--days":
-        try:
-            days_filter = int(sys.argv[2])
-        except:
-            pass
-    
-    # Step 1: Collect data
-    if not collect_data():
-        logger.error("Pipeline stopped at data collection stage")
-        return False
-    
-    # Step 2: Filter articles
-    selected_articles = filter_articles(days=days_filter)
-    if not selected_articles:
-        logger.error("Pipeline stopped at content filtering stage (no articles selected)")
-        return False
-    
-    # Step 3: Summarize articles
-    summarized_articles = summarize_articles(selected_articles)
-    if not summarized_articles:
-        logger.error("Pipeline stopped at content summarization stage (no articles summarized)")
-        return False
-    
-    # Step 4: Compile digest
-    digest_file = compile_digest(summarized_articles)
-    if not digest_file:
-        logger.error("Pipeline stopped at digest compilation stage")
-        return False
-    
-    logger.info("Pipeline completed successfully!")
-    return True
 
 def main():
     """Main entry point for the CLI application."""
@@ -163,7 +193,6 @@ def main():
     parser.add_argument("--filter", action="store_true", help="Filter articles based on relevance")
     parser.add_argument("--summarize", action="store_true", help="Summarize selected articles")
     parser.add_argument("--compile", action="store_true", help="Compile the final digest")
-    parser.add_argument("--run-all", action="store_true", help="Run the complete pipeline")
     parser.add_argument("--no-cache", action="store_true", help="Disable content filtering cache")
     parser.add_argument("--days", type=int, default=None, 
                         help="Process only articles from the last X days (default: all articles)")
@@ -178,11 +207,6 @@ def main():
     # Get cache and days settings
     use_cache = not args.no_cache
     days_filter = args.days
-    
-    # Determine what to run
-    if args.run_all:
-        success = run_full_pipeline()
-        return 0 if success else 1
     
     # Individual steps
     if args.collect:
@@ -208,7 +232,7 @@ def main():
         compile_digest(summarized_articles)
     
     # If no specific arguments were given, show help
-    if not (args.collect or args.filter or args.summarize or args.compile or args.run_all):
+    if not (args.collect or args.filter or args.summarize or args.compile):
         parser.print_help()
     
     return 0

@@ -4,8 +4,8 @@ __pycache__/
 
 .env
 articles/
-evaluation_cache/
-evaluation_logs/
+llm_trace_logs/
+llm_cache/
 processed_items.json
 
 digest*.md

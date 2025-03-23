@@ -5,10 +5,11 @@ import uuid
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Literal
 import random
+import glob
 
 logger = logging.getLogger(__name__)
 
-class EvaluationSystem:
+class JudgeSystem:
     """Generic evaluation system that can handle multiple use cases."""
     
     def __init__(self, config: Dict):
@@ -19,63 +20,10 @@ class EvaluationSystem:
             config: Configuration for the evaluation system
         """
         self.config = config
-        self.eval_dir = config.get('evaluation_logs_directory', 'evaluation_logs')
+        self.llm_trace_logs_dir = config.get('llm_trace_logs', 'llm_trace_logs')
         
         # Ensure directories exist
-        os.makedirs(self.eval_dir, exist_ok=True)
-    
-    def log_evaluation(self, 
-                       use_case: str, 
-                       item_id: str, 
-                       item_metadata: Dict, 
-                       eval_result: Dict,
-                       additional_data: Optional[Dict] = None,
-                       is_cached: bool = False) -> str:
-        """
-        Log an evaluation for any use case.
-        
-        Args:
-            use_case: The use case (e.g., 'content_filter', 'content_summary')
-            item_id: Unique identifier for the item being evaluated
-            item_metadata: Metadata about the item (title, url, etc.)
-            eval_result: The evaluation result
-            additional_data: Any additional data to include
-            is_cached: Whether this evaluation result is from cache
-            
-        Returns:
-            str: The evaluation ID
-        """
-        # Generate a unique evaluation ID
-        eval_id = str(uuid.uuid4())
-        
-        # Skip logging if the result is from cache
-        if is_cached:
-            logger.debug(f"Skipping log for cached {use_case} evaluation for item: {item_metadata.get('title', item_id)}")
-            return eval_id
-        
-        # Create evaluation entry
-        eval_entry = {
-            'id': eval_id,
-            'use_case': use_case,
-            'item_id': item_id,
-            'item_metadata': item_metadata,
-            'evaluation_result': eval_result,
-            'human_validated': False,
-            'human_decision': None,
-            'human_notes': None,
-            'evaluation_timestamp': datetime.now().isoformat(),
-        }
-        
-        # Add additional data if provided
-        if additional_data:
-            eval_entry['additional_data'] = additional_data
-        
-        # Save to evaluation log file
-        self._save_evaluation(eval_entry)
-        
-        logger.info(f"Logged {use_case} evaluation for item: {item_metadata.get('title', item_id)}")
-        
-        return eval_id
+        os.makedirs(self.llm_trace_logs_dir, exist_ok=True)
     
     def save_human_feedback(self, 
                            eval_id: str, 
@@ -96,10 +44,10 @@ class EvaluationSystem:
             updated = False
             
             # Find the evaluation in log files
-            eval_files = [f for f in os.listdir(self.eval_dir) if f.endswith('.json')]
+            eval_files = [f for f in os.listdir(self.llm_trace_logs_dir) if f.endswith('.json')]
             
             for eval_file in eval_files:
-                file_path = os.path.join(self.eval_dir, eval_file)
+                file_path = os.path.join(self.llm_trace_logs_dir, eval_file)
                 
                 try:
                     with open(file_path, 'r', encoding='utf-8') as f:
@@ -154,11 +102,16 @@ class EvaluationSystem:
         filtered_evals = []
         cutoff_date = datetime.now().timestamp() - (days * 24 * 60 * 60)
         
-        # Get all evaluation files
-        eval_files = [f for f in os.listdir(self.eval_dir) if f.endswith('.json')]
+        # Get all evaluation files, filter by use_case if provided
+        if use_case:
+            # Use glob to find matching use case log files
+            pattern = os.path.join(self.llm_trace_logs_dir, f"{use_case}_*.json")
+            eval_files = [os.path.basename(f) for f in glob.glob(pattern)]
+        else:
+            eval_files = [f for f in os.listdir(self.llm_trace_logs_dir) if f.endswith('.json')]
         
         for eval_file in eval_files:
-            file_path = os.path.join(self.eval_dir, eval_file)
+            file_path = os.path.join(self.llm_trace_logs_dir, eval_file)
             
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
@@ -173,7 +126,7 @@ class EvaluationSystem:
                         continue
                     
                     # Apply date filter
-                    timestamp_str = eval_entry.get('evaluation_timestamp', '')
+                    timestamp_str = eval_entry.get('timestamp', '')
                     if timestamp_str:
                         try:
                             timestamp = datetime.fromisoformat(timestamp_str).timestamp()
@@ -223,8 +176,8 @@ class EvaluationSystem:
         # Calculate agreement metrics
         for eval_entry in validated_evals:
             # Get the "pass" decision from both model and human
-            # This assumes there's a pass_filter field in the evaluation result
-            model_decision = eval_entry.get('evaluation_result', {}).get('pass_filter', False)
+            # Update to use the new response field structure from LlmGateway
+            model_decision = eval_entry.get('response', {}).get('pass_filter', False)
             human_decision = eval_entry.get('human_decision', False)
             
             if model_decision == human_decision:
@@ -239,43 +192,6 @@ class EvaluationSystem:
             stats['agreement_rate'] = stats['agreement'] / stats['validated']
         
         return stats
-    
-    def _save_evaluation(self, eval_entry: Dict) -> bool:
-        """
-        Save an evaluation entry to the appropriate log file.
-        
-        Args:
-            eval_entry: The evaluation entry to save
-            
-        Returns:
-            bool: Success status
-        """
-        try:
-            # Create a new log file for today if it doesn't exist
-            log_file = os.path.join(
-                self.eval_dir,
-                f"eval_log_{datetime.now().strftime('%Y%m%d')}.json"
-            )
-            
-            # Load existing evaluations or create new list
-            if os.path.exists(log_file):
-                with open(log_file, 'r', encoding='utf-8') as f:
-                    evaluations = json.load(f)
-            else:
-                evaluations = []
-            
-            # Add new evaluation
-            evaluations.append(eval_entry)
-            
-            # Save back to file
-            with open(log_file, 'w', encoding='utf-8') as f:
-                json.dump(evaluations, f, indent=2)
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error saving evaluation: {e}")
-            return False
     
     def get_disagreement_examples(self, 
                                  use_case: str,
@@ -302,7 +218,8 @@ class EvaluationSystem:
         # Filter for disagreements
         disagreements = []
         for eval_entry in validated_evals:
-            model_decision = eval_entry.get('evaluation_result', {}).get('pass_filter', False)
+            # Update to use the new response field structure from LlmGateway
+            model_decision = eval_entry.get('response', {}).get('pass_filter', False)
             human_decision = eval_entry.get('human_decision', False)
             
             # If there's a disagreement
@@ -314,3 +231,44 @@ class EvaluationSystem:
             return disagreements
         else:
             return random.sample(disagreements, count)
+            
+    def get_feedback_examples(self, use_case: str, count: int = 2) -> str:
+        """
+        Get formatted feedback examples for prompts.
+        
+        Args:
+            use_case: The use case to get examples for
+            count: Number of examples to include
+            
+        Returns:
+            str: Formatted feedback examples text
+        """
+        # Get disagreement examples
+        examples = self.get_disagreement_examples(use_case=use_case, count=count)
+        
+        if not examples:
+            return ""
+            
+        # Format examples for inclusion in prompts
+        examples_text = "\nHUMAN FEEDBACK EXAMPLES (where previous model evaluations were incorrect):\n"
+        
+        for i, example in enumerate(examples, 1):
+            item_meta = example.get('item_metadata', {})
+            # Update to use the new response field structure from LlmGateway
+            model_result = example.get('response', {})
+            
+            examples_text += f"Example {i}:\n"
+            examples_text += f"Title: {item_meta.get('title', 'Unknown')}\n"
+            examples_text += f"Model decision: {'PASS' if model_result.get('pass_filter', False) else 'FAIL'}\n"
+            examples_text += f"Human decision: {'PASS' if example.get('human_decision', False) else 'FAIL'}\n"
+            
+            if example.get('human_notes'):
+                examples_text += f"Human notes: {example.get('human_notes')}\n"
+            
+            content_snippet = example.get('additional_data', {}).get('content_snippet', '')
+            if content_snippet:
+                examples_text += f"Content snippet: {content_snippet}\n"
+            
+            examples_text += f"Reason for model error: The model failed to correctly assess whether this article matched the user's interests.\n\n"
+        
+        return examples_text
