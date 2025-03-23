@@ -62,14 +62,14 @@ def collect_data():
         logger.error(f"Data collection failed: {e}")
         return False
 
-def filter_articles():
+def filter_articles(use_cache=True, days=None):
     """Run the content filtering module to select relevant articles."""
     logger.info("Starting content filtering...")
     
     try:
         from content_filter import filter_articles
         articles_dir = COLLECTION_CONFIG['articles_directory']
-        selected_articles = filter_articles(articles_dir)
+        selected_articles = filter_articles(articles_dir, use_cache=use_cache, days=days)
         logger.info(f"Selected {len(selected_articles)} articles")
         return selected_articles
     except Exception as e:
@@ -120,13 +120,21 @@ def run_full_pipeline():
     """Run the complete pipeline from data collection to digest compilation."""
     logger.info("Starting tech news digest pipeline...")
     
+    # Get days parameter if specified
+    days_filter = None
+    if len(sys.argv) > 2 and sys.argv[1] == "--days":
+        try:
+            days_filter = int(sys.argv[2])
+        except:
+            pass
+    
     # Step 1: Collect data
     if not collect_data():
         logger.error("Pipeline stopped at data collection stage")
         return False
     
     # Step 2: Filter articles
-    selected_articles = filter_articles()
+    selected_articles = filter_articles(days=days_filter)
     if not selected_articles:
         logger.error("Pipeline stopped at content filtering stage (no articles selected)")
         return False
@@ -156,6 +164,9 @@ def main():
     parser.add_argument("--summarize", action="store_true", help="Summarize selected articles")
     parser.add_argument("--compile", action="store_true", help="Compile the final digest")
     parser.add_argument("--run-all", action="store_true", help="Run the complete pipeline")
+    parser.add_argument("--no-cache", action="store_true", help="Disable content filtering cache")
+    parser.add_argument("--days", type=int, default=None, 
+                        help="Process only articles from the last X days (default: all articles)")
     
     args = parser.parse_args()
     
@@ -163,6 +174,10 @@ def main():
     if not validate_config():
         logger.error("Configuration validation failed. Please check your settings.")
         return 1
+    
+    # Get cache and days settings
+    use_cache = not args.no_cache
+    days_filter = args.days
     
     # Determine what to run
     if args.run_all:
@@ -174,19 +189,19 @@ def main():
         collect_data()
     
     if args.filter:
-        selected_articles = filter_articles()
+        selected_articles = filter_articles(use_cache=use_cache, days=days_filter)
         print(f"Selected {len(selected_articles)} articles")
     
     if args.summarize:
         # Need to filter first if not already done
         if not args.filter:
-            selected_articles = filter_articles()
+            selected_articles = filter_articles(use_cache=use_cache, days=days_filter)
         summarized_articles = summarize_articles(selected_articles)
     
     if args.compile:
         # Need to filter and summarize first if not already done
         if not args.filter and not args.summarize:
-            selected_articles = filter_articles()
+            selected_articles = filter_articles(use_cache=use_cache, days=days_filter)
             summarized_articles = summarize_articles(selected_articles)
         elif not args.summarize:
             summarized_articles = summarize_articles(selected_articles)

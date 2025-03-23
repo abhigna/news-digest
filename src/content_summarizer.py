@@ -9,15 +9,7 @@ from pydantic import BaseModel, Field
 from typing import List
 
 # Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("tech_digest.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger("content_summarizer")
+logger = logging.getLogger(__name__)
 
 # Define the structured output model
 class ArticleSummary(BaseModel):
@@ -25,14 +17,14 @@ class ArticleSummary(BaseModel):
     key_points: List[str] = Field(description="Key technical takeaways from the article")
     technical_details: List[str] = Field(description="Specific technologies, frameworks, or technical specifications mentioned")
 
-def summarize_article(article_content, article_metadata, relevance_info):
+def summarize_article(article_content, article_metadata, evaluation_info):
     """
     Generate a concise summary of an article using LLM.
     
     Args:
         article_content: The full content of the article
         article_metadata: Metadata about the article (title, date, etc.)
-        relevance_info: Information about article relevance (topics, score)
+        evaluation_info: Information about article evaluation (topics, pass/fail)
         
     Returns:
         dict: Contains summary, key points, and technical details
@@ -42,8 +34,8 @@ def summarize_article(article_content, article_metadata, relevance_info):
     url = article_metadata.get("link", "")
     author = article_metadata.get("creator", "Unknown")
     
-    # Get topics from relevance info
-    topics = relevance_info.get("main_topics", [])
+    # Get topics from evaluation info
+    topics = evaluation_info.get("main_topics", [])
     topics_str = ", ".join(topics) if topics else "technology"
     
     # Truncate content if it's too long to fit in LLM context
@@ -126,7 +118,7 @@ def summarize_selected_articles(selected_articles):
     for article in selected_articles:
         file_path = article['file_path']
         metadata = article['metadata']
-        relevance = article['relevance']
+        evaluation = article['evaluation']
         
         try:
             # Load the full article content
@@ -142,16 +134,13 @@ def summarize_selected_articles(selected_articles):
             
             # Generate summary
             logger.info(f"Summarizing article: {metadata.get('title', 'Unknown')}")
-            summary_result = summarize_article(content, metadata, relevance)
+            summary_result = summarize_article(content, metadata, evaluation)
             
             # Add summary to article data
             article_with_summary = article.copy()
             article_with_summary['summary'] = summary_result
             
             summarized_articles.append(article_with_summary)
-            
-            # Small delay to be nice to the API
-            time.sleep(1)
             
         except Exception as e:
             logger.error(f"Error summarizing article {file_path}: {e}")

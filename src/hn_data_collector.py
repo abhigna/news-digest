@@ -6,16 +6,7 @@ import time
 from datetime import datetime
 import logging
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("data_collector.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger("hn_data_collector")
+logger = logging.getLogger(__name__)
 
 # Constants
 RSS_URL = "https://hnrss.org/classic"
@@ -24,17 +15,35 @@ PROCESSED_ITEMS_FILE = "processed_items.json"
 ARTICLES_DIRECTORY = "articles"
 
 def load_processed_items():
-    """Load the list of already processed items."""
+    """Load the list of already processed items and check articles directory."""
+    processed_items = {}
+    
+    # Load from processed_items.json if it exists
     if os.path.exists(PROCESSED_ITEMS_FILE):
         try:
             with open(PROCESSED_ITEMS_FILE, 'r') as f:
-                return json.load(f)
+                processed_items = json.load(f)
         except json.JSONDecodeError:
             logger.error(f"Error reading {PROCESSED_ITEMS_FILE}, starting with empty set")
-            return {}
     else:
         logger.info(f"{PROCESSED_ITEMS_FILE} not found, starting with empty set")
-        return {}
+    
+    # Check articles directory for already downloaded files
+    if os.path.exists(ARTICLES_DIRECTORY):
+        for filename in os.listdir(ARTICLES_DIRECTORY):
+            if filename.endswith('.json'):
+                # Extract guid from filename (remove .json extension)
+                guid_id = filename.rsplit('.', 1)[0]
+                full_guid = f"item?id={guid_id}"
+                if full_guid not in processed_items:
+                    logger.info(f"Found existing article not in processed_items: {filename}")
+                    processed_items[full_guid] = {
+                        "title": "Unknown (found in articles directory)",
+                        "processed_at": datetime.now().isoformat()
+                    }
+    
+    logger.info(f"Loaded {len(processed_items)} processed items")
+    return processed_items
 
 def save_processed_items(processed_items):
     """Save the updated list of processed items."""
@@ -111,7 +120,8 @@ def save_article(item, content):
     article_data = {
         "metadata": item,
         "content": content,
-        "collected_at": datetime.now().isoformat()
+        "collected_at": datetime.now().isoformat(),
+        "publish_date": item.get('pubDate', '')
     }
     
     # Save to file
@@ -146,26 +156,43 @@ def main():
         new_items_count = 0
         for item in items:
             guid = item.get('guid', '')
-            if guid and guid not in processed_items:
-                # Extract article content if there's a link
-                link = item.get('link', '')
-                if link:
-                    logger.info(f"Processing new article: {item['title']}")
-                    content = extract_article_content(link)
-                    if content:
-                        save_article(item, content)
-                        # Mark as processed
-                        processed_items[guid] = {
-                            "title": item['title'],
-                            "processed_at": datetime.now().isoformat()
-                        }
-                        new_items_count += 1
-                        # Small delay to be nice to the API
-                        time.sleep(1)
-                else:
-                    logger.warning(f"Item has no link: {item['title']}")
-            else:
+            if not guid:
+                continue
+
+            # Check if article already exists on disk
+            article_filename = f"{ARTICLES_DIRECTORY}/{guid.split('=')[-1]}.json"
+            if os.path.exists(article_filename):
+                logger.debug(f"Article already exists on disk: {article_filename}")
+                # Ensure it's in processed_items
+                if guid not in processed_items:
+                    processed_items[guid] = {
+                        "title": item['title'],
+                        "processed_at": datetime.now().isoformat()
+                    }
+                continue
+                
+            # Skip if already processed according to our tracking
+            if guid in processed_items:
                 logger.debug(f"Skipping already processed item: {item.get('title', 'Unknown title')}")
+                continue
+                
+            # Extract article content if there's a link
+            link = item.get('link', '')
+            if link:
+                logger.info(f"Processing new article: {item['title']}")
+                content = extract_article_content(link)
+                if content:
+                    save_article(item, content)
+                    # Mark as processed
+                    processed_items[guid] = {
+                        "title": item['title'],
+                        "processed_at": datetime.now().isoformat()
+                    }
+                    new_items_count += 1
+                    # Small delay to be nice to the API
+                    time.sleep(1)
+            else:
+                logger.warning(f"Item has no link: {item['title']}")
         
         # Save updated processed items
         save_processed_items(processed_items)
