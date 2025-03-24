@@ -184,6 +184,36 @@ def compile_digest(summarized_articles):
         logger.error(traceback.format_exc())
         return None
 
+def send_email(digest_file, to_email):
+    """Send the digest via email."""
+    if not digest_file:
+        logger.warning("No digest file to send")
+        return False
+        
+    logger.info(f"Sending digest via email to {to_email}...")
+    
+    try:
+        # Import the EmailSender class
+        from email_sender import EmailSender
+        
+        # Initialize the email sender
+        email_sender = EmailSender()
+        
+        # Send the digest
+        result = email_sender.send_digest(digest_file, to_email)
+        
+        if result:
+            logger.info(f"Digest sent successfully to {to_email}")
+            return True
+        else:
+            logger.error(f"Failed to send digest to {to_email}")
+            return False
+    except Exception as e:
+        logger.error(f"Email sending failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
+
 def main():
     """Main entry point for the CLI application."""
     parser = argparse.ArgumentParser(description="Tech News Digest System")
@@ -196,6 +226,8 @@ def main():
     parser.add_argument("--no-cache", action="store_true", help="Disable content filtering cache")
     parser.add_argument("--days", type=int, default=None, 
                         help="Process only articles from the last X days (default: all articles)")
+    parser.add_argument("--email", type=str, default=None,
+                        help="Email address to send the digest to")
     
     args = parser.parse_args()
     
@@ -207,6 +239,11 @@ def main():
     # Get cache and days settings
     use_cache = not args.no_cache
     days_filter = args.days
+    
+    # Variables to track state
+    selected_articles = []
+    summarized_articles = []
+    digest_file = None
     
     # Individual steps
     if args.collect:
@@ -229,10 +266,29 @@ def main():
             summarized_articles = summarize_articles(selected_articles)
         elif not args.summarize:
             summarized_articles = summarize_articles(selected_articles)
-        compile_digest(summarized_articles)
+        digest_file = compile_digest(summarized_articles)
+    
+    # Send email if requested
+    if args.email:
+        if not digest_file and args.compile:
+            logger.error("No digest file to send")
+        else:
+            # If no digest was compiled in this run, find the latest one
+            if not digest_file:
+                import glob
+                digest_files = glob.glob("digest_*.md")
+                if digest_files:
+                    digest_file = max(digest_files, key=os.path.getctime)
+                    logger.info(f"Using latest digest file: {digest_file}")
+                else:
+                    logger.error("No digest files found")
+            
+            # Send the email
+            if digest_file:
+                send_email(digest_file, args.email)
     
     # If no specific arguments were given, show help
-    if not (args.collect or args.filter or args.summarize or args.compile):
+    if not (args.collect or args.filter or args.summarize or args.compile or args.email):
         parser.print_help()
     
     return 0
