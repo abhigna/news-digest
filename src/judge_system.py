@@ -136,6 +136,9 @@ class JudgeSystem:
         else:
             eval_files = [f for f in os.listdir(self.llm_trace_logs_dir) if f.endswith('.json')]
         
+        # Keep track of seen item_ids to prevent duplicates
+        seen_item_ids = set()
+        
         for eval_file in eval_files:
             file_path = os.path.join(self.llm_trace_logs_dir, eval_file)
             
@@ -160,6 +163,16 @@ class JudgeSystem:
                                 continue
                         except ValueError:
                             pass
+                    
+                    # Check for duplicates based on item_id
+                    item_id = eval_entry.get('item_id')
+                    if item_id and item_id in seen_item_ids:
+                        # Skip this duplicate entry
+                        continue
+                    
+                    # Add item_id to seen set
+                    if item_id:
+                        seen_item_ids.add(item_id)
                     
                     filtered_evals.append(eval_entry)
                     

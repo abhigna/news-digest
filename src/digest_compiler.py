@@ -52,8 +52,21 @@ class DigestCompiler:
         
         # For each article, find its main topic
         for article in articles:
-            # Get main topics from relevance info
-            main_topics = article.get('evaluation', {}).get('main_topics', [])
+            # Get main topics from evaluation info - handle both dict and object access
+            main_topics = []
+            evaluation = article.get('evaluation', None)
+            
+            if evaluation is None:
+                # If no evaluation, put in "Miscellaneous"
+                topic_groups["Miscellaneous"].append(article)
+                continue
+                
+            # Handle different types of evaluation objects
+            if isinstance(evaluation, dict):
+                main_topics = evaluation.get('main_topics', [])
+            else:
+                # It's likely a ContentFilterModelResponse object
+                main_topics = evaluation.main_topics if hasattr(evaluation, 'main_topics') else []
             
             if not main_topics:
                 # If no topics, put in "Miscellaneous"
@@ -145,10 +158,20 @@ class DigestCompiler:
             # Keep the original if parsing fails
             pass
         
-        # Get summary elements
-        summary_text = summary.get('summary', 'No summary available.')
-        key_points = summary.get('key_points', [])
-        technical_details = summary.get('technical_details', [])
+        # Get summary elements - handle both dict and object access
+        summary_text = "No summary available."
+        key_points = []
+        technical_details = []
+        
+        if isinstance(summary, dict):
+            summary_text = summary.get('summary', 'No summary available.')
+            key_points = summary.get('key_points', [])
+            technical_details = summary.get('technical_details', [])
+        else:
+            # It's likely a ContentSummaryModelResponse object
+            summary_text = summary.summary if hasattr(summary, 'summary') else 'No summary available.'
+            key_points = summary.key_points if hasattr(summary, 'key_points') else []
+            technical_details = getattr(summary, 'technical_details', [])
         
         # Start building the article section
         article_text = f"### [{title}]({url})\n\n"

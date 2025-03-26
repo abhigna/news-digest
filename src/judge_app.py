@@ -201,50 +201,59 @@ class JudgeApp:
     
     def get_agreement_stats(self, use_case=None, days=30):
         """Calculate agreement statistics."""
-        # Get evaluations
-        evaluations = self.get_evaluations(use_case=use_case, days=days)
-        
-        # Calculate stats
+        # Get all evaluations for the period first to get the correct total
+        all_evaluations = self.get_evaluations(use_case=use_case, days=days)
+
         stats = {
-            'total': len(evaluations),
+            'total': len(all_evaluations),
             'validated': 0,
             'agreement': 0,
             'agreement_rate': 0,
-            'false_positives': 0,
-            'false_negatives': 0
+            'false_positives': 0,  # Model says PASS, Human says FAIL
+            'false_negatives': 0   # Model says FAIL, Human says PASS
         }
-        
-        # Count validated evaluations
-        validated_evals = [e for e in evaluations if e.get('human_validated', False)]
+
+        # Filter for validated evaluations
+        validated_evals = [e for e in all_evaluations if e.get('human_validated', False)]
         stats['validated'] = len(validated_evals)
-        
+
         if stats['validated'] == 0:
+            # No validated evaluations, agreement rate is undefined (or 0)
             return stats
-        
-        # Calculate agreement metrics
+
+        comparable_count = 0 # Counter for evaluations where comparison is meaningful (e.g., content filters)
+
+        # Calculate agreement metrics only on validated evaluations
         for eval_entry in validated_evals:
-            # Get the judge decision - handle different formats
-            judge_decision = eval_entry.get('judge_decision', {})
-            
-            # Get decisions
-            
-            if isinstance(judge_decision, ContentEvaluation):
-                model_decision = judge_decision.pass_filter
-            else:
-                model_decision = judge_decision.get('pass_filter')
-            human_decision = eval_entry.get('human_decision', False)
-            
-            if model_decision == human_decision:
-                stats['agreement'] += 1
-            elif model_decision and not human_decision:
-                stats['false_positives'] += 1
-            elif not model_decision and human_decision:
-                stats['false_negatives'] += 1
-        
-        # Calculate agreement rate
-        if stats['validated'] > 0:
-            stats['agreement_rate'] = stats['agreement'] / stats['validated']
-        
+            # Get the raw model response dictionary
+            response = eval_entry.get('response', {})
+            # Get the human decision (should exist since it's validated)
+            human_decision = eval_entry.get('human_decision', None)
+
+            # Check if this evaluation is a content filter type and has a human decision
+            # We can only calculate agreement for types that have a comparable boolean decision
+            if 'pass_filter' in response and human_decision is not None:
+                # Extract the model's boolean decision from the 'response' dictionary
+                model_decision = response.get('pass_filter', False) # Default to False if key exists but value is missing
+
+                comparable_count += 1 # This evaluation can be compared
+
+                # Compare model and human decisions
+                if model_decision == human_decision:
+                    stats['agreement'] += 1
+                elif model_decision and not human_decision:
+                    # Model passed, but human failed -> False Positive
+                    stats['false_positives'] += 1
+                elif not model_decision and human_decision:
+                    # Model failed, but human passed -> False Negative
+                    stats['false_negatives'] += 1
+            # else: This validated evaluation might be a summary, or lack human_decision data; skip comparison.
+
+        # Calculate agreement rate based only on the evaluations that were comparable
+        if comparable_count > 0:
+            stats['agreement_rate'] = stats['agreement'] / comparable_count
+        # If comparable_count is 0 (e.g., only validated summaries), agreement rate remains 0
+
         return stats
 
 

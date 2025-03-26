@@ -56,8 +56,13 @@ class ContentSummarizer:
         url = article_metadata.get("link", "")
         author = article_metadata.get("creator", "Unknown")
         
-        # Get topics from evaluation info
-        topics = evaluation_info.get("main_topics", [])
+        # Get topics from evaluation info - handle both dict and object access
+        topics = []
+        if isinstance(evaluation_info, dict):
+            topics = evaluation_info.get("main_topics", [])
+        else:
+            topics = evaluation_info.main_topics if hasattr(evaluation_info, 'main_topics') else []
+        
         topics_str = ", ".join(topics) if topics else "technology"
         
         # Truncate content if it's too long to fit in LLM context
@@ -170,7 +175,22 @@ IMPORTANT GUIDELINES:
                 
                 # Generate summary
                 logger.info(f"Summarizing article: {metadata.get('title', 'Unknown')}")
-                summary_result = self.summarize_article(content, metadata, evaluation)
+                # Convert evaluation to dict if it's a ContentFilterModelResponse object
+                evaluation_dict = {}
+                if hasattr(evaluation, 'model_dump'):
+                    evaluation_dict = evaluation.model_dump()
+                elif hasattr(evaluation, 'dict'):
+                    evaluation_dict = evaluation.dict()
+                else:
+                    # Access attributes directly
+                    evaluation_dict = {
+                        'main_topics': evaluation.main_topics if hasattr(evaluation, 'main_topics') else [],
+                        'pass_filter': evaluation.pass_filter if hasattr(evaluation, 'pass_filter') else False,
+                        'reasoning': evaluation.reasoning if hasattr(evaluation, 'reasoning') else '',
+                        'specific_interests_matched': evaluation.specific_interests_matched if hasattr(evaluation, 'specific_interests_matched') else []
+                    }
+                
+                summary_result = self.summarize_article(content, metadata, evaluation_dict)
                 
                 # Add summary to article data
                 article_with_summary = article.copy()
