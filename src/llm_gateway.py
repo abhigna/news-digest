@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional, List, Type
 from pydantic import BaseModel
 from openai import OpenAI
 import instructor
+from models import ModelResponse, ContentFilterModelResponse, ContentSummaryModelResponse
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +173,36 @@ class LlmGateway:
         # Generate a log ID if not provided
         log_id = str(uuid.uuid4())
         
+        # Convert response to appropriate model if needed
+        model_response = None
+        if hasattr(response, 'pass_filter'):
+            # It's a content filter response
+            model_response = ContentFilterModelResponse(
+                id=item_id,
+                item_metadata=item_metadata,
+                is_cached=is_cached,
+                pass_filter=response.pass_filter if hasattr(response, 'pass_filter') else response.get('pass_filter', False),
+                main_topics=response.main_topics if hasattr(response, 'main_topics') else response.get('main_topics', []),
+                reasoning=response.reasoning if hasattr(response, 'reasoning') else response.get('reasoning', ''),
+                specific_interests_matched=response.specific_interests_matched if hasattr(response, 'specific_interests_matched') else response.get('specific_interests_matched', [])
+            )
+        elif hasattr(response, 'summary'):
+            # It's a content summary response
+            model_response = ContentSummaryModelResponse(
+                id=item_id,
+                item_metadata=item_metadata,
+                is_cached=is_cached,
+                summary=response.summary if hasattr(response, 'summary') else response.get('summary', ''),
+                key_points=response.key_points if hasattr(response, 'key_points') else response.get('key_points', [])
+            )
+        else:
+            # Create a generic ModelResponse
+            model_response = ModelResponse(
+                id=item_id,
+                item_metadata=item_metadata,
+                is_cached=is_cached
+            )
+            
         log_entry = {
             "id": log_id,
             "use_case": self.use_case,
@@ -180,14 +211,9 @@ class LlmGateway:
             "timestamp": datetime.now().isoformat(),
             "prompt": prompt,
             "is_cached": is_cached,
-            "additional_data": additional_data
+            "additional_data": additional_data,
+            "response": model_response.model_dump() if hasattr(model_response, 'model_dump') else model_response
         }
-        
-        # Add response data with generic term
-        if hasattr(response, "model_dump"):
-            log_entry["response"] = response.model_dump()
-        else:
-            log_entry["response"] = response
         
         # Save to trace logs
         self._append_to_trace_log(log_entry)

@@ -7,6 +7,7 @@ from openai import OpenAI
 import instructor
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
+from models import ContentSummaryModelResponse
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -15,7 +16,6 @@ logger = logging.getLogger(__name__)
 class ArticleSummary(BaseModel):
     summary: str = Field(description="A concise summary of the article with the main subject italicized")
     key_points: List[str] = Field(description="3-5 key points from the article, formatted as a list", default=[])
-    technical_details: List[str] = Field(description="Notable technical details, tools, or concepts mentioned", default=[])
 
 class ContentSummarizer:
     """
@@ -49,7 +49,7 @@ class ContentSummarizer:
             evaluation_info: Information about article evaluation (topics, pass/fail)
             
         Returns:
-            dict: Contains the summary with main subject italicized
+            ContentSummaryModelResponse: Contains the summary and key points
         """
         # Extract relevant metadata
         title = article_metadata.get("title", "")
@@ -88,13 +88,11 @@ Topics: {topics_str}
 Content: {truncated_content}
 {examples_section}
 TASK:
-Create a comprehensive technical summary of this article with three components:
+Create a comprehensive technical summary of this article with two components:
 
 1. Summary: Write a direct, crisp {max_length}-word summary that captures the main technological points and significance to developers. Focus on technical details, tools, frameworks, or concepts mentioned.
 
 2. Key Points: Extract 3-5 key points or takeaways from the article that would be most relevant to developers.
-
-3. Technical Details: List any specific technologies, tools, frameworks, programming languages, or technical concepts mentioned.
 
 IMPORTANT GUIDELINES:
 1. Start immediately with the key information - avoid phrases like "The article explores", "This article discusses", etc.
@@ -121,18 +119,25 @@ IMPORTANT GUIDELINES:
                 use_cache=self.config.get('use_cache', True)
             )
             
-            # Convert result to dict if needed
-            if hasattr(result, "model_dump"):
-                return result.model_dump()
-            return result
+            # Convert to our standardized response model
+            response = ContentSummaryModelResponse(
+                id=item_id,
+                item_metadata=article_metadata,
+                is_cached=result.get('is_cached', False) if isinstance(result, dict) else False,
+                summary=result.summary if hasattr(result, 'summary') else result.get('summary', ''),
+                key_points=result.key_points if hasattr(result, 'key_points') else result.get('key_points', [])
+            )
+            
+            return response
             
         except Exception as e:
             logger.error(f"Error in article summarization: {e}")
-            return {
-                'summary': f"Error: {str(e)}",
-                'key_points': [],
-                'technical_details': []
-            }
+            return ContentSummaryModelResponse(
+                id=item_id,
+                item_metadata=article_metadata,
+                summary=f"Error: {str(e)}",
+                key_points=[]
+            )
     
     def summarize_selected_articles(self, selected_articles):
         """

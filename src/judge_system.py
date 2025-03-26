@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional, Literal
 import random
 import glob
+from models import HumanFeedback, ModelResponse, ContentFilterModelResponse, ContentSummaryModelResponse
 
 logger = logging.getLogger(__name__)
 
@@ -44,45 +45,70 @@ class JudgeSystem:
             updated = False
             
             # Find the evaluation in log files
-            eval_files = [f for f in os.listdir(self.llm_trace_logs_dir) if f.endswith('.json')]
+            feedback_file = self.config.get("human_feedback_file")
             
-            for eval_file in eval_files:
-                file_path = os.path.join(self.llm_trace_logs_dir, eval_file)
-                
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        evaluations = json.load(f)
-                    
-                    # Look for the evaluation entry
-                    for eval_entry in evaluations:
-                        if eval_entry.get('id') == eval_id:
-                            # Update with human feedback
-                            eval_entry['human_validated'] = True
-                            eval_entry['human_decision'] = human_decision
-                            eval_entry['human_notes'] = human_notes
-                            eval_entry['human_validation_timestamp'] = datetime.now().isoformat()
-                            updated = True
-                            break
-                    
-                    # If found and updated, save back to file
-                    if updated:
-                        with open(file_path, 'w', encoding='utf-8') as f:
-                            json.dump(evaluations, f, indent=2)
-                        
-                        logger.info(f"Saved human feedback for evaluation {eval_id}")
-                        return True
-                
-                except Exception as e:
-                    logger.error(f"Error processing evaluation file {eval_file}: {e}")
+            # Create file if it doesn't exist
+            if not os.path.exists(feedback_file):
+                with open(feedback_file, 'w', encoding='utf-8') as f:
+                    json.dump([], f, indent=2)
             
+            # Load existing feedback
+            with open(feedback_file, 'r', encoding='utf-8') as f:
+                feedback_entries = json.load(f)
+            
+            # Look for existing entry
+            for entry in feedback_entries:
+                if entry.get('eval_id') == eval_id:
+                    # Update existing entry
+                    entry['human_decision'] = human_decision
+                    entry['human_notes'] = human_notes
+                    entry['timestamp'] = datetime.now().isoformat()
+                    updated = True
+                    break
+            
+            # Add new entry if not found
             if not updated:
-                logger.error(f"Could not find evaluation with ID {eval_id}")
+                new_entry = HumanFeedback(
+                    eval_id=eval_id,
+                    human_decision=human_decision,
+                    human_notes=human_notes or "",
+                    model_decision=self._get_model_decision(eval_id)
+                ).model_dump()
+                feedback_entries.append(new_entry)
             
-            return updated
+            # Save back to file
+            with open(feedback_file, 'w', encoding='utf-8') as f:
+                json.dump(feedback_entries, f, indent=2)
             
+            logger.info(f"Saved human feedback for evaluation {eval_id}")
+            return True
+                
         except Exception as e:
             logger.error(f"Error saving human feedback: {e}")
             return False
+    
+    def _get_model_decision(self, eval_id: str) -> bool:
+        """Get the model's decision for a given evaluation ID"""
+        # Find the evaluation in log files
+        eval_files = [f for f in os.listdir(self.llm_trace_logs_dir) if f.endswith('.json')]
+        
+        for eval_file in eval_files:
+
+            file_path = os.path.join(self.llm_trace_logs_dir, eval_file)
+            
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    evaluations = json.load(f)
+                
+                # Look for the evaluation entry
+                for eval_entry in evaluations:
+                    if eval_entry.get('id') == eval_id:
+                        response = eval_entry.get('response', {})
+                        return response.get('pass_filter', False)
+            except Exception:
+                pass
+        
+        return False
     
     def get_evaluations(self, 
                         use_case: Optional[str] = None, 
@@ -253,22 +279,30 @@ class JudgeSystem:
         examples_text = "\nHUMAN FEEDBACK EXAMPLES (where previous model evaluations were incorrect):\n"
         
         for i, example in enumerate(examples, 1):
-            item_meta = example.get('item_metadata', {})
-            # Update to use the new response field structure from LlmGateway
-            model_result = example.get('response', {})
-            
-            examples_text += f"Example {i}:\n"
-            examples_text += f"Title: {item_meta.get('title', 'Unknown')}\n"
-            examples_text += f"Model decision: {'PASS' if model_result.get('pass_filter', False) else 'FAIL'}\n"
-            examples_text += f"Human decision: {'PASS' if example.get('human_decision', False) else 'FAIL'}\n"
-            
-            if example.get('human_notes'):
-                examples_text += f"Human notes: {example.get('human_notes')}\n"
-            
-            content_snippet = example.get('additional_data', {}).get('content_snippet', '')
-            if content_snippet:
-                examples_text += f"Content snippet: {content_snippet}\n"
-            
-            examples_text += f"Reason for model error: The model failed to correctly assess whether this article matched the user's interests.\n\n"
+            try:
+                # Create HumanFeedback object
+                item_meta = example.get('item_metadata', {})
+                # Update to use the new response field structure
+                model_result = example.get('response', {})
+                model_decision = model_result.get('pass_filter', False)
+                
+                feedback = HumanFeedback(
+                    eval_id=example.get('id', str(uuid.uuid4())),
+                    human_decision=example.get('human_decision', False),
+                    model_decision=model_decision,
+                    human_notes=example.get('human_notes', ''),
+                    title=item_meta.get('title', 'Unknown')
+                )
+                
+                examples_text += f"Example {i}:\n"
+                examples_text += feedback.format_for_prompt()
+                
+                content_snippet = example.get('additional_data', {}).get('content_snippet', '')
+                if content_snippet:
+                    examples_text += f"Content snippet: {content_snippet}\n"
+                
+                examples_text += f"Reason for model error: The model failed to correctly assess whether this article matched the user's interests.\n\n"
+            except Exception as e:
+                logger.error(f"Error formatting feedback example: {e}")
         
         return examples_text

@@ -12,6 +12,7 @@ import instructor
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from llm_gateway import LlmGateway
+from models import ContentFilterModelResponse
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ class ContentFilter:
         self.cache_dir = filter_config.get('llm_cache', 'llm_cache')
         os.makedirs(self.cache_dir, exist_ok=True)
     
-    def evaluate_content(self, article_content: str, article_metadata: Dict[str, Any]) -> Dict[str, Any]:
+    def evaluate_content(self, article_content: str, article_metadata: Dict[str, Any]) -> ContentFilterModelResponse:
         """
         Evaluate content using LLM with a binary pass/fail approach.
         
@@ -69,7 +70,7 @@ class ContentFilter:
             article_metadata: Metadata about the article (title, date, etc.)
             
         Returns:
-            dict: Contains pass/fail decision, reasoning, and topics
+            ContentFilterModelResponse: Contains pass/fail decision, reasoning, and topics
         """
         # Prepare prompt for the LLM with detailed interest descriptions
         primary_interests = self.interests.get("primary_interests", [])
@@ -142,19 +143,29 @@ This evaluation will be used for both filtering and human validation, so be thor
                 use_cache=self.filter_config.get('use_cache', True)
             )
             
-            # Convert result to dict
-            if hasattr(result, "model_dump"):
-                return result.model_dump()
-            return result
+            # Convert to our standardized response model
+            response = ContentFilterModelResponse(
+                id=item_id,
+                item_metadata=article_metadata,
+                is_cached=result.get('is_cached', False) if isinstance(result, dict) else False,
+                pass_filter=result.pass_filter if hasattr(result, 'pass_filter') else result.get('pass_filter', False),
+                main_topics=result.main_topics if hasattr(result, 'main_topics') else result.get('main_topics', []),
+                reasoning=result.reasoning if hasattr(result, 'reasoning') else result.get('reasoning', ''),
+                specific_interests_matched=result.specific_interests_matched if hasattr(result, 'specific_interests_matched') else result.get('specific_interests_matched', [])
+            )
+            
+            return response
             
         except Exception as e:
             logger.error(f"Error in content evaluation: {e}")
-            return {
-                'pass_filter': False,
-                'main_topics': [],
-                'reasoning': f"Error processing article: {str(e)}",
-                'specific_interests_matched': []
-            }
+            return ContentFilterModelResponse(
+                id=item_id,
+                item_metadata=article_metadata,
+                pass_filter=False,
+                main_topics=[],
+                reasoning=f"Error processing article: {str(e)}",
+                specific_interests_matched=[]
+            )
     
     def filter_articles(self, articles_directory: str, use_cache: bool = True, days: Optional[int] = None) -> List[Dict[str, Any]]:
         """
@@ -231,7 +242,7 @@ This evaluation will be used for both filtering and human validation, so be thor
                 evaluation_result = self.evaluate_content(content, metadata)
                 
                 # Add to filtered list if passes
-                if evaluation_result['pass_filter']:
+                if evaluation_result.pass_filter:
                     filtered_articles.append({
                         'file_path': file_path,
                         'metadata': metadata,

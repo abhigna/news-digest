@@ -46,7 +46,7 @@ class EmailSender:
             # Convert markdown to HTML
             html_content = markdown.markdown(
                 md_content, 
-                extensions=['extra', 'codehilite']
+                extensions=['extra', 'codehilite', 'sane_lists']
             )
             
             # Add some basic styling

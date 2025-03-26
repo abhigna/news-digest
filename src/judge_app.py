@@ -17,6 +17,8 @@ from config import JUDGE_CONFIG, COLLECTION_CONFIG, INTERESTS, CRITIQUE_CONFIG
 import requests
 from content_filter import ContentEvaluation  
 from content_summarizer import ArticleSummary
+from models import HumanFeedback, ModelResponse, ContentFilterModelResponse, ContentSummaryModelResponse
+from data_migration import load_model_response, convert_json_logs
 
 
 # Set up logging
@@ -24,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 ARTICLES_DIR = COLLECTION_CONFIG.get("articles_directory", "articles")
-FEEDBACK_FILE = "human_feedback.json"
+FEEDBACK_FILE = JUDGE_CONFIG.get("human_feedback_file")
 LLM_TRACE_LOGS_DIR = JUDGE_CONFIG.get('llm_trace_logs')
 
 # Ensure directories exist
@@ -43,104 +45,159 @@ class JudgeApp:
     """A system for managing content judgments and decisions."""
     
     def __init__(self, config):
+        """Initialize the judge application.
+        
+        Args:
+            config: Configuration dictionary
+        """
         self.config = config
         self.llm_trace_logs_dir = config.get('llm_trace_logs')
         os.makedirs(self.llm_trace_logs_dir, exist_ok=True)
+        
+        # Initialize the JudgeSystem
+        from judge_system import JudgeSystem
+        self.judge_system = JudgeSystem(config)
     
     def get_evaluations(self, use_case=None, days=30, validated_only=False):
-        """Get evaluations with filtering options."""
-        filtered_evals = []
-        cutoff_date = datetime.now() - timedelta(days=days)
+        """Get evaluations filtered by criteria"""
+        evaluations = self.judge_system.get_evaluations(
+            use_case=use_case,
+            days=days,
+            human_validated_only=validated_only
+        )
         
-        # Get evaluation files
-        if not os.path.exists(self.llm_trace_logs_dir):
-            return []
-            
-        eval_files = [f for f in os.listdir(self.llm_trace_logs_dir) if f.endswith('.json') and f != "article_exceptions.json" and f != FEEDBACK_FILE]
+        # Normalize evaluations to ensure consistent format
+        normalized_evals = [self.normalize_evaluation(eval_entry) for eval_entry in evaluations]
         
-        for eval_file in eval_files:
-            file_path = os.path.join(self.llm_trace_logs_dir, eval_file)
-            
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    evaluations = json.load(f)
-                
-                for eval_entry in evaluations:
-                    # Normalize evaluation data structure
-                    eval_entry = self.normalize_evaluation(eval_entry)
-                    
-                    # Apply filters
-                    if use_case and eval_entry.get('use_case') != use_case:
-                        continue
-                    
-                    if validated_only and not eval_entry.get('human_validated', False):
-                        continue
-                    
-                    # Apply date filter
-                    timestamp_str = eval_entry.get('evaluation_timestamp', '')
-                    if timestamp_str:
-                        try:
-                            timestamp = datetime.fromisoformat(timestamp_str)
-                            if timestamp < cutoff_date:
-                                continue
-                        except ValueError:
-                            pass
-                    
-                    filtered_evals.append(eval_entry)
-                    
-            except Exception as e:
-                logger.error(f"Error reading evaluation file {eval_file}: {e}")
-        
-        return filtered_evals
+        return normalized_evals
     
     def save_human_feedback(self, eval_id, human_decision, human_notes=None):
-        """Save human feedback for an evaluation."""
+        """Save human feedback on a model evaluation"""
+        return self.judge_system.save_human_feedback(
+            eval_id=eval_id,
+            human_decision=human_decision,
+            human_notes=human_notes
+        )
+    
+    def normalize_evaluation(self, eval_entry):
+        """
+        Normalize evaluation data to ensure consistent format regardless of source.
+        This helps handle both old and new format evaluations.
+        """
+        normalized = eval_entry.copy()
+        
+        # Handle the response field - convert to model objects if needed
+        response_data = eval_entry.get('response', {})
+        if isinstance(response_data, dict):
+            # Convert the response to the appropriate model object
+            try:
+                model_response = load_model_response(response_data)
+                normalized['model_response_obj'] = model_response
+                
+                # For backwards compatibility, keep the original response
+                normalized['response'] = response_data
+            except Exception as e:
+                logger.error(f"Error converting response data: {e}")
+        
+        # Check if this evaluation has human feedback
+        feedback = self._get_human_feedback(eval_entry.get('id'))
+        if feedback:
+            normalized['human_feedback'] = feedback
+            normalized['human_validated'] = True
+            normalized['human_decision'] = feedback.human_decision
+            normalized['human_notes'] = feedback.human_notes
+        
+        return normalized
+    
+    def _get_human_feedback(self, eval_id):
+        """Get human feedback for a specific evaluation"""
+        feedback_file = self.config.get("human_feedback_file")
+        
+        if not os.path.exists(feedback_file):
+            return None
+            
         try:
-            updated = False
+            with open(feedback_file, 'r', encoding='utf-8') as f:
+                feedback_entries = json.load(f)
             
-            # Find the evaluation in log files
-            eval_files = [f for f in os.listdir(self.llm_trace_logs_dir) if f.endswith('.json') and f != "article_exceptions.json" and f != FEEDBACK_FILE]
-            
-            for eval_file in eval_files:
-                file_path = os.path.join(self.llm_trace_logs_dir, eval_file)
-                
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        evaluations = json.load(f)
-                    
-                    # Look for the evaluation entry
-                    for eval_entry in evaluations:
-                        if eval_entry.get('id') == eval_id:
-                            # Update with human feedback
-                            eval_entry['human_validated'] = True
-                            eval_entry['human_decision'] = human_decision
-                            eval_entry['human_notes'] = human_notes
-                            eval_entry['human_validation_timestamp'] = datetime.now().isoformat()
-                            updated = True
-                            break
-                    
-                    # If found and updated, save back to file
-                    if updated:
-                        with open(file_path, 'w', encoding='utf-8') as f:
-                            json.dump(evaluations, f, indent=2)
-                        
-                        # Also save to feedback file for easy reference
-                        self._add_to_feedback_file(eval_id, human_decision, human_notes)
-                        
-                        logger.info(f"Saved human feedback for evaluation {eval_id}")
-                        return True
-                
-                except Exception as e:
-                    logger.error(f"Error processing evaluation file {eval_file}: {e}")
-            
-            if not updated:
-                logger.error(f"Could not find evaluation with ID {eval_id}")
-            
-            return updated
-            
+            for entry in feedback_entries:
+                if entry.get('eval_id') == eval_id:
+                    # Convert dict to HumanFeedback object
+                    return HumanFeedback(**entry)
         except Exception as e:
-            logger.error(f"Error saving human feedback: {e}")
-            return False
+            logger.error(f"Error getting human feedback: {e}")
+            
+        return None
+    
+    def _add_to_feedback_file(self, eval_id, human_decision, human_notes):
+        """Add or update entry in the human feedback file"""
+        feedback_file = self.config.get("human_feedback_file")
+        
+        # Create file if it doesn't exist
+        if not os.path.exists(feedback_file):
+            with open(feedback_file, 'w', encoding='utf-8') as f:
+                json.dump([], f, indent=2)
+                
+        # Load existing feedback
+        with open(feedback_file, 'r', encoding='utf-8') as f:
+            feedback_entries = json.load(f)
+        
+        # Find evaluation to get model decision
+        model_decision = False
+        evaluation = self._find_evaluation(eval_id)
+        if evaluation:
+            response = evaluation.get('response', {})
+            model_decision = response.get('pass_filter', False)
+        
+        # Check if entry already exists
+        for entry in feedback_entries:
+            if entry.get('eval_id') == eval_id:
+                # Update existing entry
+                entry['human_decision'] = human_decision
+                entry['human_notes'] = human_notes
+                entry['timestamp'] = datetime.now().isoformat()
+                entry['model_decision'] = model_decision
+                
+                # Save updates
+                with open(feedback_file, 'w', encoding='utf-8') as f:
+                    json.dump(feedback_entries, f, indent=2)
+                return True
+        
+        # Create new entry
+        new_entry = HumanFeedback(
+            eval_id=eval_id,
+            human_decision=human_decision,
+            human_notes=human_notes or "",
+            model_decision=model_decision,
+            timestamp=datetime.now().isoformat(),
+            title=self._get_title_for_eval(eval_id)
+        ).model_dump()
+        
+        feedback_entries.append(new_entry)
+        
+        # Save updates
+        with open(feedback_file, 'w', encoding='utf-8') as f:
+            json.dump(feedback_entries, f, indent=2)
+            
+        return True
+    
+    def _find_evaluation(self, eval_id):
+        """Find evaluation by ID"""
+        # Get all evaluations
+        all_evals = self.get_evaluations(days=365)  # Look back a full year
+        
+        for eval_entry in all_evals:
+            if eval_entry.get('id') == eval_id:
+                return eval_entry
+                
+        return None
+    
+    def _get_title_for_eval(self, eval_id):
+        """Get title for an evaluation"""
+        eval_entry = self._find_evaluation(eval_id)
+        if eval_entry:
+            return eval_entry.get('item_metadata', {}).get('title', 'Unknown')
+        return 'Unknown'
     
     def get_agreement_stats(self, use_case=None, days=30):
         """Calculate agreement statistics."""
@@ -189,159 +246,6 @@ class JudgeApp:
             stats['agreement_rate'] = stats['agreement'] / stats['validated']
         
         return stats
-    
-    def normalize_evaluation(self, eval_entry):
-        """Normalize evaluation data structure to handle different formats."""
-        normalized = eval_entry.copy()
-        
-        # Ensure standard fields exist
-        if 'file_path' not in normalized:
-            file_path = normalized.get('item_metadata', {}).get('file_path', '')
-            if not file_path:
-                # Try to find from other fields
-                item_id = normalized.get('item_id', '')
-                if item_id:
-                    possible_path = os.path.join(ARTICLES_DIR, f"{item_id}.json")
-                    if os.path.exists(possible_path):
-                        file_path = possible_path
-            normalized['file_path'] = file_path
-            
-        if 'title' not in normalized:
-            title = normalized.get('item_metadata', {}).get('title', 'Unknown')
-            normalized['title'] = title
-            
-        # Process different use cases differently
-        use_case = normalized.get('use_case', 'content_filter')
-        
-        if use_case == "content_filter":
-            # Get the response data which contains the ContentEvaluation
-            response_data = normalized.get('response', {})
-            if response_data:
-                try:
-                    # Try to convert to ContentEvaluation if it's not already
-                    if not isinstance(response_data, ContentEvaluation):
-                        # If it's a dict, convert to ContentEvaluation
-                        judge_decision = ContentEvaluation(
-                            pass_filter=response_data.get('pass_filter', False),
-                            main_topics=response_data.get('main_topics', []),
-                            reasoning=response_data.get('reasoning', ''),
-                            specific_interests_matched=response_data.get('specific_interests_matched', [])
-                        )
-                    else:
-                        judge_decision = response_data
-                    normalized['judge_decision'] = judge_decision
-                except Exception as e:
-                    logger.error(f"Error parsing ContentEvaluation: {e}")
-                    normalized['judge_decision'] = {
-                        'pass_filter': False,
-                        'reasoning': 'Error parsing evaluation data',
-                        'main_topics': [],
-                        'specific_interests_matched': []
-                    }
-            elif 'judge_decision' not in normalized:
-                normalized['judge_decision'] = {
-                    'pass_filter': False,
-                    'reasoning': 'No evaluation data found',
-                    'main_topics': [],
-                    'specific_interests_matched': []
-                }
-        
-        elif use_case == "content_summarizer":
-            # For content_summarizer, the structure is different
-            response_data = normalized.get('response', {})
-            if response_data:
-                try:
-                    # Try to convert to ArticleSummary if it's not already
-                    if not isinstance(response_data, ArticleSummary):
-                        # If it's a dict, convert to ArticleSummary
-                        judge_decision = ArticleSummary(
-                            summary=response_data.get('summary', ''),
-                            key_points=response_data.get('key_points', []),
-                            technical_details=response_data.get('technical_details', [])
-                        )
-                    else:
-                        judge_decision = response_data
-                    normalized['judge_decision'] = judge_decision
-                except Exception as e:
-                    logger.error(f"Error parsing ArticleSummary: {e}")
-                    normalized['judge_decision'] = {
-                        'summary': 'Error parsing summary data',
-                        'key_points': [],
-                        'technical_details': []
-                    }
-            elif 'judge_decision' not in normalized:
-                normalized['judge_decision'] = {
-                    'summary': 'No summary data found',
-                    'key_points': [],
-                    'technical_details': []
-                }
-        
-        return normalized
-    
-    def _add_to_feedback_file(self, eval_id, human_decision, human_notes):
-        """Add feedback to a separate feedback file for easier analysis."""
-        feedback_path = os.path.join(self.llm_trace_logs_dir, FEEDBACK_FILE)
-        
-        # Load existing feedback or create new
-        if os.path.exists(feedback_path):
-            with open(feedback_path, 'r', encoding='utf-8') as f:
-                feedback_data = json.load(f)
-        else:
-            feedback_data = []
-        
-        # Find the evaluation in log files to get file path
-        file_path = None
-        title = None
-        content = None
-        
-        eval_files = [f for f in os.listdir(self.llm_trace_logs_dir) if f.endswith('.json') and f != "article_exceptions.json" and f != FEEDBACK_FILE]
-        
-        for eval_file in eval_files:
-            file_path_full = os.path.join(self.llm_trace_logs_dir, eval_file)
-            
-            try:
-                with open(file_path_full, 'r', encoding='utf-8') as f:
-                    evaluations = json.load(f)
-                
-                # Look for the evaluation entry
-                for eval_entry in evaluations:
-                    if eval_entry.get('id') == eval_id:
-                        file_path = eval_entry.get('file_path', '')
-                        title = eval_entry.get('title', 'Unknown')
-                        break
-                
-                if file_path:
-                    break
-                
-            except Exception as e:
-                logger.error(f"Error reading evaluation file {eval_file}: {e}")
-        
-        # Get article content if file path is available
-        if file_path:
-            content_text, _ = get_article_content(file_path)
-            content = content_text
-        
-        # Add new feedback with content
-        feedback_entry = {
-            'eval_id': eval_id,
-            'human_decision': human_decision,
-            'human_notes': human_notes,
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        # Add content and title if available
-        if content:
-            feedback_entry['content'] = content
-        if title:
-            feedback_entry['title'] = title
-        if file_path:
-            feedback_entry['file_path'] = file_path
-        
-        feedback_data.append(feedback_entry)
-        
-        # Save updated feedback
-        with open(feedback_path, 'w', encoding='utf-8') as f:
-            json.dump(feedback_data, f, indent=2)
 
 
 def get_article_content(file_path):
@@ -559,65 +463,95 @@ def generate_word_cloud(evaluations):
 
 
 def generate_model_critique(eval_entry, original_context=None):
-    """Generate a critique of the model's decision for an evaluation."""
+    """Generate a critique of the model's decision"""
     try:
-        # Extract evaluation data
-        judge_decision = eval_entry.get('judge_decision', {})
+        # Get normalized evaluation
+        if 'model_response_obj' not in eval_entry:
+            # This is already normalized data
+            eval_entry = judge_app.normalize_evaluation(eval_entry)
+            
+        # Extract information
+        response = eval_entry.get('response', {})
+        human_feedback = eval_entry.get('human_feedback')
         
-        # Handle both Pydantic model and dict formats for content_filter
-        if isinstance(judge_decision, ContentEvaluation):
-            model_decision = judge_decision.pass_filter
-            reasoning = judge_decision.reasoning
-            topics = judge_decision.main_topics
-            interests = judge_decision.specific_interests_matched
-        # Handle both Pydantic model and dict formats for content_summarizer
-        elif isinstance(judge_decision, ArticleSummary):
-            model_decision = True  # Summarizers don't have pass/fail
-            reasoning = judge_decision.summary
-            topics = []
-            interests = []
-        # Fallback to dictionary access
-        else:
-            model_decision = judge_decision.get('pass_filter', False)
-            reasoning = judge_decision.get('reasoning', 'No reasoning provided')
-            topics = judge_decision.get('main_topics', [])
-            interests = judge_decision.get('specific_interests_matched', [])
-        
-        # Get content and title for the article
-        title = eval_entry.get('title', 'Unknown Article')
-        content = eval_entry.get('content', '')
-        
-        # Get content if not directly available in the evaluation
-        if not content:
-            file_path = eval_entry.get('file_path', '')
-            content, _ = get_article_content(file_path)
+        # Get model decision
+        model_decision = response.get('pass_filter', False)  # For content filter
         
         # Check if required configuration is available
         if not CRITIQUE_CONFIG.get("api_key"):
             logger.warning("No API key found in CRITIQUE_CONFIG, falling back to simple critique")
-            return 'error: no api key or original context'
-        
-        from openai import OpenAI
-        
-        # Initialize OpenAI client with OpenRouter configuration
-        client = OpenAI(
-            base_url=CRITIQUE_CONFIG['api_base'],
-            api_key=CRITIQUE_CONFIG['api_key']
-        )
-        
-        # Create different system and user prompts based on use case
-        selected_use_case = eval_entry.get('use_case', 'content_filter')
-        
-        if selected_use_case == "content_filter":
-            # Format the user interests for the prompt
-            primary_interests = INTERESTS.get("primary_interests", [])
-            excluded_interests = INTERESTS.get("excluded_interests", [])
             
-            primary_interests_formatted = "\n".join([f"- {interest}" for interest in primary_interests])
-            excluded_interests_formatted = "\n".join([f"- {interest}" for interest in excluded_interests])
+            # Special case for summarizer
+            if 'summary' in response:
+                # This is a content summary
+                return "Content summary critique not implemented yet"
             
-            system_prompt = f"""You are an expert AI evaluator. Your task is to critique the decision made by a content filtering model.
+            # Content filter critique - works without human feedback
+            critique = f"## Model Decision Critique\n\n"
+            critique += f"**Model Decision**: {'PASS' if model_decision else 'FAIL'}\n\n"
             
+            # Add human decision if available
+            if human_feedback:
+                human_decision = human_feedback.human_decision
+                if model_decision == human_decision:
+                    agreement = "The model's decision matches the human evaluation."
+                else:
+                    agreement = "The model's decision does NOT match the human evaluation."
+                    
+                critique += f"**Human Decision**: {'PASS' if human_decision else 'FAIL'}\n\n"
+                critique += f"**Agreement**: {agreement}\n\n"
+            
+            # Add reasoning
+            critique += f"**Model Reasoning**:\n{response.get('reasoning', 'No reasoning provided')}\n\n"
+            
+            # Add topics
+            topics = response.get('main_topics', [])
+            critique += f"**Identified Topics**:\n"
+            critique += "\n".join([f"- {topic}" for topic in topics])
+            critique += "\n\n"
+            
+            # Add human notes if available
+            if human_feedback and human_feedback.human_notes:
+                critique += f"**Human Notes**:\n{human_feedback.human_notes}\n\n"
+            
+            return critique
+        
+        # Get content and title for the article
+        title = eval_entry.get('item_metadata', {}).get('title', 'Unknown Article')
+        file_path = eval_entry.get('item_metadata', {}).get('file_path', '')
+        content, _ = get_article_content(file_path)
+        
+        # Check if we have API configuration
+        if not all([
+            CRITIQUE_CONFIG.get('api_base'),
+            CRITIQUE_CONFIG.get('api_key'),
+            CRITIQUE_CONFIG.get('model')
+        ]):
+            logger.error("Incomplete API configuration for critique generation")
+            return "Error: Incomplete API configuration. Please check the CRITIQUE_CONFIG settings."
+            
+        try:
+            from openai import OpenAI
+            
+            # Initialize OpenAI client with OpenRouter configuration
+            client = OpenAI(
+                base_url=CRITIQUE_CONFIG['api_base'],
+                api_key=CRITIQUE_CONFIG['api_key']
+            )
+            
+            # Create different system and user prompts based on use case
+            selected_use_case = eval_entry.get('use_case', 'content_filter')
+            
+            if selected_use_case == "content_filter":
+                # Format the user interests for the prompt
+                primary_interests = INTERESTS.get("primary_interests", [])
+                excluded_interests = INTERESTS.get("excluded_interests", [])
+                
+                primary_interests_formatted = "\n".join([f"- {interest}" for interest in primary_interests])
+                excluded_interests_formatted = "\n".join([f"- {interest}" for interest in excluded_interests])
+                
+                system_prompt = f"""You are an expert AI evaluator. Your task is to critique the decision made by a content filtering model.
+                
 You will analyze whether the model correctly determined if an article matches the user's interests based on:
 1. The content and topic of the article
 2. The user's specified interests and exclusions
@@ -638,14 +572,14 @@ Excluded Interests:
 
 === MODEL EVALUATION ===
 Decision: {"PASS" if model_decision else "FAIL"}
-Reasoning: {reasoning}
-Topics Identified: {', '.join(topics) if topics else 'None'}
-Interests Matched: {', '.join(interests) if interests else 'None'}
+Reasoning: {response.get('reasoning', 'No reasoning provided')}
+Topics Identified: {', '.join(response.get('main_topics', [])) if response.get('main_topics', []) else 'None'}
+Interests Matched: {', '.join(response.get('specific_interests_matched', [])) if response.get('specific_interests_matched', []) else 'None'}
 
 Return a concise paragraph with your critique, not a structured response."""
 
-            # Create user prompt with only the title and content
-            user_prompt = f"""
+                # Create user prompt with only the title and content
+                user_prompt = f"""
 Please provide a brief critique of whether this content filtering decision is correct based on the user's interests.
 
 === ARTICLE TITLE ===
@@ -654,10 +588,10 @@ Please provide a brief critique of whether this content filtering decision is co
 === ARTICLE CONTENT ===
 {content}
 """
-            
-        elif selected_use_case == "content_summarizer":
-            system_prompt = """You are an expert AI evaluator. Your task is to critique the summary generated by a content summarization model.
-            
+                
+            elif selected_use_case == "content_summarizer":
+                system_prompt = """You are an expert AI evaluator. Your task is to critique the summary generated by a content summarization model.
+                
 You will analyze whether the model effectively summarized the article by evaluating:
 1. Accuracy - Does the summary contain factual errors or misrepresentations?
 2. Completeness - Does the summary include the key information from the article?
@@ -666,12 +600,12 @@ You will analyze whether the model effectively summarized the article by evaluat
 
 Return a concise paragraph with your critique, not a structured response."""
 
-            # For summarizer, we need the summary and key points
-            summary = judge_decision.get('summary', 'No summary provided')
-            key_points = judge_decision.get('key_points', [])
-            key_points_formatted = "\n".join([f"- {point}" for point in key_points]) if key_points else "None provided"
-            
-            user_prompt = f"""
+                # For summarizer, we need the summary and key points
+                summary = response.get('summary', 'No summary provided')
+                key_points = response.get('key_points', [])
+                key_points_formatted = "\n".join([f"- {point}" for point in key_points]) if key_points else "None provided"
+                
+                user_prompt = f"""
 === ARTICLE TITLE ===
 {title}
 
@@ -686,27 +620,33 @@ Return a concise paragraph with your critique, not a structured response."""
 
 Please provide a brief critique of this summary's quality, accuracy, and completeness.
 """
-        
-        else:
-            # Fallback for any other use case
-            system_prompt = "You are an expert AI evaluator. Provide a brief critique of the model's output."
-            user_prompt = f"Content: {content}\n\nModel output: {reasoning}\n\nProvide a brief critique."
-        
-        try:
+            
+            # Log API request for debugging
+            logger.info(f"Sending critique request to API: {CRITIQUE_CONFIG['model']}")
+            
             # Get simple text output instead of structured output
-            response = client.chat.completions.create(
+            api_response = client.chat.completions.create(
                 model=CRITIQUE_CONFIG["model"],
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                max_tokens=CRITIQUE_CONFIG["max_tokens"],
-                temperature=CRITIQUE_CONFIG["temperature"],
-                timeout=CRITIQUE_CONFIG['timeout_seconds']
+                max_tokens=CRITIQUE_CONFIG.get("max_tokens", 500),
+                temperature=CRITIQUE_CONFIG.get("temperature", 0.7),
+                timeout=CRITIQUE_CONFIG.get('timeout_seconds', 30)
             )
             
+            # Check if we got a valid response
+            if not api_response or not hasattr(api_response, 'choices') or not api_response.choices:
+                logger.error(f"Invalid API response: {api_response}")
+                return "Error: Received invalid response from the API. Please check the logs for details."
+            
             # Return the simple text critique
-            return response.choices[0].message.content
+            return api_response.choices[0].message.content
+            
+        except ImportError as e:
+            logger.error(f"OpenAI library not found: {e}")
+            return "Error: OpenAI library not installed. Please install it with 'pip install openai'."
             
         except Exception as e:
             logger.error(f"Error in critique generation: {e}")
@@ -717,342 +657,394 @@ Please provide a brief critique of this summary's quality, accuracy, and complet
         return f"Error generating critique: {str(e)}"
 
 
-def main():
-    """Main function for the Streamlit app."""
-    st.set_page_config(page_title="Judge App", layout="wide")
+def run_interface(judge_app):
+    """Run the Streamlit interface for the judge application"""
+    st.set_page_config(
+        page_title="Content Judge System",
+        page_icon="⚖️",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
     
-    st.title("Judge App")
+    st.title("Content Judge System")
+    st.sidebar.title("Navigation")
     
-    # Initialize evaluation system
-    judge_app = JudgeApp(JUDGE_CONFIG)
+    # Navigation options
+    page = st.sidebar.radio(
+        "Select Page",
+        ["Evaluation Dashboard", "Review Content", "Interest Management", "Exceptions Management"]
+    )
     
-    # Sidebar with use case selection
-    st.sidebar.header("Options")
+    # Display the selected page
+    if page == "Evaluation Dashboard":
+        show_dashboard(judge_app)
+    elif page == "Review Content":
+        show_review_page(judge_app)
+    elif page == "Interest Management":
+        show_interest_management()
+    elif page == "Exceptions Management":
+        show_exceptions_management()
+
+
+def show_dashboard(judge_app):
+    """Show evaluation dashboard with statistics"""
+    st.header("Evaluation Dashboard")
     
-    # Update to include content summarizer
-    use_cases = ["content_filter", "content_summarizer"]
-    selected_use_case = st.sidebar.selectbox("Judge Use Case", use_cases)
+    # Filter controls
+    col1, col2 = st.columns(2)
+    with col1:
+        use_case = st.selectbox(
+            "Filter by Use Case",
+            ["All", "content_filter", "content_summarizer"]
+        )
+    with col2:
+        days = st.slider("Days to Include", 1, 90, 30)
     
-    # Other sidebar options
-    days_back = st.sidebar.slider("Days to include", 1, 90, JUDGE_CONFIG.get("default_days_to_display", 30))
-    show_validated = st.sidebar.checkbox("Show already validated items", False)
+    # Get filtered stats
+    use_case_filter = None if use_case == "All" else use_case
+    stats = judge_app.get_agreement_stats(use_case=use_case_filter, days=days)
     
-    # Number of items to show per page
-    items_per_page = st.sidebar.slider("Items per page", 5, 50, 10)
+    # Display metrics
+    metrics_cols = st.columns(5)
+    metrics_cols[0].metric("Total Evaluations", stats['total'])
+    metrics_cols[1].metric("Validated", stats['validated'])
+    metrics_cols[2].metric("Agreement Rate", f"{stats['agreement_rate']:.2%}")
+    metrics_cols[3].metric("False Positives", stats['false_positives'])
+    metrics_cols[4].metric("False Negatives", stats['false_negatives'])
     
-    # Filter options for content filter
-    filter_mode = st.sidebar.radio("Filter by", ["All", "Passed filter", "Failed filter"])
+    # Show recent evaluations
+    st.subheader("Recent Evaluations")
+    evaluations = judge_app.get_evaluations(use_case=use_case_filter, days=days)
     
-    # Load evaluations
-    evaluations = judge_app.get_evaluations(use_case=selected_use_case, days=days_back)
+    if not evaluations:
+        st.info("No evaluations found with the current filters.")
+        return
     
-    # Apply filters
-    if filter_mode == "Passed filter":
-        evaluations = [e for e in evaluations if e.get('judge_decision', {}).get('pass_filter', False)]
-    elif filter_mode == "Failed filter":
-        evaluations = [e for e in evaluations if not e.get('judge_decision', {}).get('pass_filter', False)]
+    # Create a DataFrame for display
+    eval_data = []
+    for eval_entry in evaluations:
+        # Extract response data
+        response = eval_entry.get('response', {})
+        
+        # Initialize variables with defaults
+        entry_type = "Unknown"
+        decision = "N/A"  # Default value for decision
+        
+        # Determine if it's a filter or summary
+        if isinstance(response, dict):
+            if 'pass_filter' in response:
+                entry_type = "Filter"
+                decision = "PASS" if response.get('pass_filter') else "FAIL"
+            elif 'summary' in response:
+                entry_type = "Summary"
+                # decision stays as "N/A"
+        
+        # Get human validation info
+        human_validated = eval_entry.get('human_validated', False)
+        human_decision = "PASS" if eval_entry.get('human_decision', False) else "FAIL" if human_validated else "N/A"
+        
+        # Add to data
+        eval_data.append({
+            'ID': eval_entry.get('id', ''),
+            'Timestamp': eval_entry.get('timestamp', ''),
+            'Title': eval_entry.get('item_metadata', {}).get('title', 'Unknown'),
+            'Type': entry_type,
+            'Model Decision': decision,
+            'Human Decision': human_decision,
+            'Validated': "Yes" if human_validated else "No"
+        })
     
-    if not show_validated:
+    # Show as dataframe
+    df = pd.DataFrame(eval_data)
+    st.dataframe(df)
+
+
+def show_review_page(judge_app):
+    """Show content review page"""
+    st.header("Review Content")
+    
+    # Filter controls
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        use_case = st.selectbox(
+            "Filter by Use Case",
+            ["All", "content_filter", "content_summarizer"],
+            key="review_use_case"
+        )
+    with col2:
+        days = st.slider("Days to Include", 1, 90, 30, key="review_days")
+    with col3:
+        show_validated = st.checkbox("Show Validated Only", False)
+    with col4:
+        exclude_validated = st.checkbox("Exclude Validated", False)
+    
+    # Get evaluations
+    use_case_filter = None if use_case == "All" else use_case
+    evaluations = judge_app.get_evaluations(
+        use_case=use_case_filter, 
+        days=days,
+        validated_only=show_validated
+    )
+    
+    # Filter out validated examples if exclude_validated is checked
+    if exclude_validated:
         evaluations = [e for e in evaluations if not e.get('human_validated', False)]
     
-    # Create tabs
-    tabs = st.tabs(["Evaluate", "Statistics"])
+    if not evaluations:
+        st.info("No evaluations found with the current filters.")
+        return
     
-    # Tab 1: Evaluate (formerly Batch Evaluate)
-    with tabs[0]:
-        if not evaluations:
-            st.info("No articles found matching the current filters.")
-        else:
-            st.write(f"Found {len(evaluations)} articles to evaluate. Showing up to {items_per_page} items.")
-            
-            # Create evaluation data for batch display
-            batch_evals = evaluations[:items_per_page]
-            
-            for i, eval_entry in enumerate(batch_evals):
-                # Normalize evaluation data before displaying
-                eval_entry = judge_app.normalize_evaluation(eval_entry)
-                
-                with st.expander(f"{i+1}. {eval_entry.get('title', 'Unknown Article')}", expanded=True):
-                    col1, col2 = st.columns([3, 2])
-                    
-                    with col1:
-                        # Article content
-                        file_path = eval_entry.get('file_path', '')
-                        content, metadata = get_article_content(file_path)
-                        
-                        st.write(f"**Source:** {metadata.get('source', 'Unknown')}")
-                        st.write(f"**Date:** {metadata.get('pubDate', 'Unknown')}")
-                        
-                        # Display truncated content with a "Show more" toggle instead of nested expander
-                        truncated = len(content) > 1000
-                        display_content = content[:1000] + "..." if truncated else content
-                        st.markdown(display_content)
-                        
-                        if truncated:
-                            if st.checkbox(f"Show full content for article {i+1}", key=f"full_{eval_entry.get('id')}"):
-                                st.markdown(content)
-                    
-                    with col2:
-                        # Model evaluation display
-                        judge_decision = eval_entry.get('judge_decision', {})
-                        
-                        if selected_use_case == "content_filter":
-                            # First check if it's a ContentEvaluation object
-                            if isinstance(judge_decision, ContentEvaluation):
-                                model_decision = "✅ PASS" if judge_decision.pass_filter else "❌ FAIL"
-                                topics = judge_decision.main_topics
-                                interests = judge_decision.specific_interests_matched
-                                reasoning = judge_decision.reasoning
-                            else:
-                                # Fallback to dictionary access for backward compatibility
-                                model_decision = "✅ PASS" if judge_decision.get('pass_filter', False) else "❌ FAIL"
-                                topics = judge_decision.get('main_topics', [])
-                                interests = judge_decision.get('specific_interests_matched', [])
-                                reasoning = judge_decision.get('reasoning', 'No reasoning provided')
-                            
-                            st.write(f"**Model Decision:** {model_decision}")
-                            
-                            st.write("**Topics:**")
-                            if topics:
-                                for topic in topics:
-                                    st.write(f"- {topic}")
-                            else:
-                                st.write("No topics identified")
-                            
-                            st.write("**Interests Matched:**")
-                            if interests:
-                                for interest in interests:
-                                    st.write(f"- {interest}")
-                            else:
-                                st.write("No interests matched")
-                            
-                            st.write("**Reasoning:**")
-                            st.write(reasoning)
-                        
-                        elif selected_use_case == "content_summarizer":
-                            # First check if it's an ArticleSummary object
-                            if isinstance(judge_decision, ArticleSummary):
-                                summary = judge_decision.summary
-                                key_points = judge_decision.key_points
-                                tech_details = judge_decision.technical_details
-                            else:
-                                # Fallback to dictionary access for backward compatibility
-                                summary = judge_decision.get('summary', 'No summary provided')
-                                key_points = judge_decision.get('key_points', [])
-                                tech_details = judge_decision.get('technical_details', [])
-                            
-                            st.write("**Generated Summary:**")
-                            st.markdown(summary)
-                            
-                            st.write("**Key Points:**")
-                            if key_points:
-                                for point in key_points:
-                                    st.write(f"- {point}")
-                            
-                            st.write("**Technical Details:**")
-                            if tech_details:
-                                for detail in tech_details:
-                                    st.write(f"- {detail}")
-                    
-                    # Human evaluation inputs
-                    human_decision_options = ["PASS", "FAIL"] if selected_use_case == "content_filter" else ["GOOD", "NEEDS IMPROVEMENT"]
-                    
-                    eval_id = eval_entry.get('id')
-                    col_rating, col_notes = st.columns([1, 3])
-                    
-                    with col_rating:
-                        human_decision = st.radio(
-                            f"Your rating for item {i+1}:",
-                            human_decision_options,
-                            key=f"decision_{eval_id}",
-                            horizontal=True
-                        )
-                    
-                    with col_notes:
-                        # Get original context from config if available
-                        original_context = CRITIQUE_CONFIG.get("evaluation_context", "Evaluate if content matches user interests")
-                        
-                        # Add button to generate critique
-                        if st.button("Generate Critique", key=f"gen_critique_{eval_id}"):
-                            with st.spinner("Generating critique..."):
-                                auto_critique = generate_model_critique(eval_entry, original_context)
-                                st.session_state[f"critique_{eval_id}"] = auto_critique
-                        
-                        # Initialize the critique text area with model-generated critique if available
-                        critique_text = st.session_state.get(f"critique_{eval_id}", "")
-                        human_notes = st.text_area(
-                            "Critique (you can edit this)",
-                            value=critique_text,
-                            key=f"notes_{eval_id}",
-                            height=200
-                        )
-                    
-                    # Submit button in its own row for better layout
-                    if st.button("Submit Evaluation", key=f"submit_{eval_id}"):
-                        # Convert decision to boolean for storage
-                        decision_bool = (human_decision == "PASS" or human_decision == "GOOD")
-                        
-                        if judge_app.save_human_feedback(eval_id, decision_bool, human_notes):
-                            st.success("Evaluation saved!")
-                            time.sleep(1)
-                            st.rerun()
-                        else:
-                            st.error("Failed to save evaluation.")
-                        
-                        # Add exception option for content filtering
-                        if selected_use_case == "content_filter":
-                            add_exception = st.checkbox("Add this article as an exception", key=f"exception_{eval_id}")
-                            
-                            # Exception reason
-                            if add_exception:
-                                if human_decision == "PASS":
-                                    exception_reason = st.text_area(
-                                        "Why should this specific article pass despite not matching your interests?",
-                                        placeholder="This helps improve future filtering...",
-                                        key=f"exception_reason_pass_{eval_id}"
-                                    )
-                                else:  # FAIL
-                                    exception_reason = st.text_area(
-                                        "Why should this specific article be excluded despite matching your interests?",
-                                        placeholder="This helps improve future filtering...",
-                                        key=f"exception_reason_fail_{eval_id}"
-                                    )
-                                
-                                if st.button("Save Exception", key=f"save_exception_{eval_id}"):
-                                    exception_data = {
-                                        'article_id': eval_entry.get('id'),
-                                        'file_path': eval_entry.get('file_path', ''),
-                                        'title': eval_entry.get('title', 'Unknown'),
-                                        'exception_type': 'manual_pass' if human_decision == "PASS" else 'manual_fail',
-                                        'reason': exception_reason if exception_reason else "No reason provided"
-                                    }
-                                    
-                                    if save_article_exception(exception_data):
-                                        st.success("Article exception saved!")
-                                        time.sleep(1)
-                                    else:
-                                        st.error("Failed to save exception.")
+    # Create a selection list of titles with model decision
+    titles = []
+    for e in evaluations:
+        title = e.get('item_metadata', {}).get('title', 'Unknown')
+        eval_id = e.get('id', '')
+        
+        # Get model decision
+        response = e.get('response', {})
+        model_decision = "N/A"
+        if isinstance(response, dict):
+            if 'pass_filter' in response:
+                model_decision = "PASS" if response.get('pass_filter') else "FAIL"
+        
+        # Format title with model decision
+        titles.append(f"{title} - Model: {model_decision} ({eval_id})")
     
-    # Tab 2: Statistics (formerly Tab 3)
-    with tabs[1]:
-        st.subheader("Evaluation Statistics")
+    selected_title = st.selectbox("Select Content to Review", titles)
+    
+    if selected_title:
+        # Extract evaluation ID from selection
+        eval_id = selected_title.split('(')[-1].strip(')')
         
-        # Calculate statistics
-        stats = judge_app.get_agreement_stats(use_case=selected_use_case, days=days_back)
+        # Find the selected evaluation
+        selected_eval = next((e for e in evaluations if e.get('id') == eval_id), None)
         
-        # Display statistics
-        col1, col2, col3, col4 = st.columns(4)
+        if selected_eval:
+            display_evaluation(selected_eval, judge_app)
+
+
+def display_evaluation(eval_entry, judge_app):
+    """Display a single evaluation with review controls"""
+    st.subheader(eval_entry.get('item_metadata', {}).get('title', 'Unknown'))
+    
+    # Get content
+    file_path = eval_entry.get('item_metadata', {}).get('file_path', '')
+    content, metadata = get_article_content(file_path)
+    
+    # Display basic info with model decision
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.write(f"**Source:** {metadata.get('source', 'Unknown')}")
+        st.write(f"**Date:** {metadata.get('pubDate', 'Unknown')}")
+    with col2:
+        st.write(f"**Evaluation ID:** {eval_entry.get('id', '')}")
+        st.write(f"**Evaluated:** {eval_entry.get('timestamp', '')}")
+    with col3:
+        # Extract and display model decision prominently
+        response = eval_entry.get('response', {})
+        model_decision = "N/A"
+        if isinstance(response, dict):
+            if 'pass_filter' in response:
+                model_decision = "PASS" if response.get('pass_filter') else "FAIL"
+                
+        st.markdown(f"**Model Decision:** **:{'green' if model_decision == 'PASS' else 'red'}[{model_decision}]**")
         
-        with col1:
-            st.metric("Total Articles", stats['total'])
+        # Display human decision if available
+        human_validated = eval_entry.get('human_validated', False)
+        if human_validated:
+            human_decision = "PASS" if eval_entry.get('human_decision', False) else "FAIL"
+            st.markdown(f"**Human Decision:** **:{'green' if human_decision == 'PASS' else 'red'}[{human_decision}]**")
+    
+    # Display content
+    with st.expander("Article Content", expanded=False):
+        st.markdown(content)
+    
+    # Display model evaluation
+    st.subheader("Model Evaluation")
+    
+    # Determine type of evaluation
+    if 'pass_filter' in response:
+        # Content filter response
+        st.write("**Reasoning:**")
+        st.markdown(response.get('reasoning', 'No reasoning provided'))
         
-        with col2:
-            st.metric("Validated Articles", stats['validated'])
-        
-        with col3:
-            st.metric("Agreement Rate", f"{stats['agreement_rate']:.1%}")
-        
-        with col4:
-            st.metric("False Positives", stats['false_positives'])
-        
-        # Agreement Rate Over Time
-        st.subheader("Agreement Rate Over Time")
-        # Get all validated evaluations
-        validated_evals = [e for e in judge_app.get_evaluations(use_case=selected_use_case, days=days_back) 
-                          if e.get('human_validated', False)]
-        
-        if validated_evals:
-            # Create dataframe with dates and agreement info
-            agreement_data = []
-            for eval_entry in validated_evals:
-                validation_date = eval_entry.get('human_validation_timestamp', '')
-                if validation_date:
-                    try:
-                        date = datetime.fromisoformat(validation_date).date()
-                        model_decision = eval_entry.get('judge_decision').pass_filter
-                        human_decision = eval_entry.get('human_decision', False)
-                        agreement = int(model_decision == human_decision)
-                        agreement_data.append({
-                            'date': date,
-                            'agreement': agreement
-                        })
-                    except ValueError:
-                        pass
+        st.write("**Main Topics:**")
+        for topic in response.get('main_topics', []):
+            st.markdown(f"- {topic}")
             
-            if agreement_data:
-                # Convert to dataframe
-                df = pd.DataFrame(agreement_data)
-                # Group by date and calculate agreement rate
-                daily_agreement = df.groupby('date').agg(
-                    agreement_rate=('agreement', 'mean'),
-                    count=('agreement', 'count')
-                ).reset_index()
-                
-                # Create time series plot
-                fig = px.line(
-                    daily_agreement, 
-                    x='date', 
-                    y='agreement_rate',
-                    title='Daily Agreement Rate',
-                    labels={'date': 'Date', 'agreement_rate': 'Agreement Rate'},
-                    markers=True
-                )
-                
-                # Add hover information showing count of evaluations
-                fig.update_traces(
-                    hovertemplate='Date: %{x}<br>Agreement Rate: %{y:.1%}<br>Evaluations: %{customdata}<extra></extra>',
-                    customdata=daily_agreement['count']
-                )
-                
-                # Format y-axis as percentage
-                fig.update_layout(yaxis=dict(tickformat='.0%'))
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Add 7-day rolling average if enough data
-                if len(daily_agreement) > 7:
-                    daily_agreement['rolling_avg'] = daily_agreement['agreement_rate'].rolling(7).mean()
-                    fig2 = px.line(
-                        daily_agreement.dropna(), 
-                        x='date', 
-                        y='rolling_avg',
-                        title='7-Day Rolling Average Agreement Rate',
-                        labels={'date': 'Date', 'rolling_avg': 'Agreement Rate (7-day avg)'}
-                    )
-                    fig2.update_layout(yaxis=dict(tickformat='.0%'))
-                    st.plotly_chart(fig2, use_container_width=True)
+        if response.get('specific_interests_matched', []):
+            st.write("**Interests Matched:**")
+            for interest in response.get('specific_interests_matched', []):
+                st.markdown(f"- {interest}")
+    
+    elif 'summary' in response:
+        # Content summary response
+        st.write("**Summary:**")
+        st.markdown(response.get('summary', 'No summary provided'))
+        
+        st.write("**Key Points:**")
+        for point in response.get('key_points', []):
+            st.markdown(f"- {point}")
+    
+    # Human feedback section
+    st.subheader("Human Feedback")
+    
+    # Check if already validated
+    human_validated = eval_entry.get('human_validated', False)
+    current_decision = eval_entry.get('human_decision', False) if human_validated else None
+    current_notes = eval_entry.get('human_notes', '')
+    
+    # Decision input
+    new_decision = st.radio(
+        "Your Decision",
+        ["PASS", "FAIL"],
+        index=0 if current_decision else 1,
+        help="Indicate whether this content should pass or fail the filter"
+    )
+    
+    # Add button to generate critique
+    if st.button("Generate Model Critique"):
+        with st.spinner("Generating critique..."):
+            critique = generate_model_critique(eval_entry)
+            st.session_state[f"critique_{eval_entry.get('id')}"] = critique
+    
+    # Notes input with critique
+    critique_text = st.session_state.get(f"critique_{eval_entry.get('id')}", current_notes)
+    new_notes = st.text_area(
+        "Notes (explain your decision)",
+        value=critique_text,
+        help="Provide your reasoning for this decision, especially if you disagree with the model"
+    )
+    
+    # Submit button
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        if st.button("Submit Feedback"):
+            # Convert PASS/FAIL to boolean
+            decision_bool = (new_decision == "PASS")
+            
+            # Save feedback
+            if judge_app.save_human_feedback(eval_entry.get('id', ''), decision_bool, new_notes):
+                st.success("Feedback saved successfully!")
+                time.sleep(1)
+                st.rerun()
             else:
-                st.info("Not enough data with timestamps to generate agreement over time chart.")
-        else:
-            st.info("No validated evaluations available for agreement over time analysis.")
+                st.error("Failed to save feedback. Please try again.")
+
+
+def show_interest_management():
+    """Show interest management page"""
+    st.header("Interest Management")
+    
+    # Display current interests
+    st.subheader("Current Interests")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Primary Interests**")
+        for interest in INTERESTS.get("primary_interests", []):
+            st.markdown(f"- {interest}")
+    
+    with col2:
+        st.write("**Excluded Interests**")
+        for interest in INTERESTS.get("excluded_interests", []):
+            st.markdown(f"- {interest}")
+    
+    # Add new interests
+    st.subheader("Add New Interests")
+    new_interest = st.text_input("New Interest")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Add to Primary"):
+            if new_interest:
+                if save_config_changes(interests_to_add=[new_interest]):
+                    st.success(f"Added '{new_interest}' to primary interests")
+                    time.sleep(1)
+                    st.rerun()
+    
+    with col2:
+        if st.button("Add to Excluded"):
+            if new_interest:
+                if save_config_changes(interests_to_remove=[new_interest]):
+                    st.success(f"Added '{new_interest}' to excluded interests")
+                    time.sleep(1)
+                    st.rerun()
+
+
+def show_exceptions_management():
+    """Show exceptions management page"""
+    st.header("Exceptions Management")
+    
+    # Get all exceptions
+    exceptions = get_article_exceptions()
+    
+    if not exceptions:
+        st.info("No article exceptions found.")
+    else:
+        # Display exceptions
+        st.subheader("Current Exceptions")
         
-        # Topic distribution
-        st.subheader("Topic Distribution")
-        topics = extract_topics(evaluations)
-        if topics:
-            top_topics = dict(topics.most_common(15))
-            fig = px.bar(
-                x=list(top_topics.keys()),
-                y=list(top_topics.values()),
-                labels={'x': 'Topic', 'y': 'Count'}
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No topic data available.")
-        
-        # Interest matches
-        st.subheader("Matched Interests")
-        interests = extract_interest_matches(evaluations)
-        if interests:
-            top_interests = dict(interests.most_common(15))
-            fig = px.pie(
-                values=list(top_interests.values()),
-                names=list(top_interests.keys()),
-                hole=0.4
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No interest match data available.")
+        for i, exception in enumerate(exceptions):
+            with st.expander(f"Exception: {exception.get('article_id', 'Unknown')}"):
+                st.write(f"**Article ID:** {exception.get('article_id', 'Unknown')}")
+                st.write(f"**Reason:** {exception.get('reason', 'No reason provided')}")
+                st.write(f"**Date Added:** {exception.get('timestamp', 'Unknown')}")
+                
+                if st.button("Remove Exception", key=f"remove_{i}"):
+                    if remove_exception(exception.get('article_id')):
+                        st.success("Exception removed successfully!")
+                        time.sleep(1)
+                        st.rerun()
+    
+    # Add new exception
+    st.subheader("Add New Exception")
+    article_id = st.text_input("Article ID")
+    reason = st.text_area("Reason for Exception")
+    
+    if st.button("Add Exception"):
+        if article_id and reason:
+            exception_data = {
+                "article_id": article_id,
+                "reason": reason
+            }
+            
+            if save_article_exception(exception_data):
+                st.success("Exception added successfully!")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error("Failed to add exception. Please try again.")
+
+
+def main():
+    """Main entry point for the application"""
+    import argparse
+    from data_migration import convert_json_logs
+    
+    parser = argparse.ArgumentParser(description='Judge system for evaluating content filtering and summarization')
+    parser.add_argument('--config', type=str, default='config.json', help='Path to config file')
+    parser.add_argument('--migrate', action='store_true', help='Migrate existing data to new model format')
+    args = parser.parse_args()
+    
+    # Set up logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Migrate data if requested
+    if args.migrate:
+        logger.info("Migrating existing data...")
+        convert_json_logs(JUDGE_CONFIG.get('llm_trace_logs', 'llm_trace_logs'))
+    
+    # Initialize the judge system
+    global judge_app
+    judge_app = JudgeApp(JUDGE_CONFIG)
+    
+    # Start the interface
+    run_interface(judge_app)
 
 
 if __name__ == "__main__":

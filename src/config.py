@@ -25,7 +25,7 @@ OPENROUTER_CONFIG = {
 CRITIQUE_CONFIG = {
     "api_key": os.getenv("OPENROUTER_API_KEY"),
     "api_base": "https://openrouter.ai/api/v1",
-    "model": "google/gemini-2.0-pro-exp-02-05:free",  # "anthropic/claude-3-7-sonnet:2024-08-08",
+    "model": "google/gemini-2.5-pro-exp-03-25:free",  # "anthropic/claude-3-7-sonnet:2024-08-08",
     "max_tokens": 2048,
     "temperature": 0.5,
     "timeout_seconds": 120
@@ -78,6 +78,7 @@ JUDGE_CONFIG = {
     "default_days_to_display": 30,
     "include_feedback_examples": True,
     "examples_count": 2,
+    "human_feedback_file": "human_feedback.json"
 }
 
 FILTERING_CONFIG = {
