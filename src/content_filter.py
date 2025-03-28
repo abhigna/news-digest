@@ -81,7 +81,6 @@ class ContentFilter:
         excluded_interests_text = "\n".join([f"- {interest}" for interest in excluded_interests])
         
         title = article_metadata.get("title", "")
-        source = article_metadata.get("source", "")
         
         # Truncate content if it's too long to fit in LLM context
         max_content_chars = 6000
@@ -89,11 +88,12 @@ class ContentFilter:
         
         # Get feedback examples text
         examples_text = ""
+
         if self.filter_config.get('include_feedback_examples', False):
             examples_text = self._get_feedback_examples()
         
         # Only include examples section if we actually have examples
-        examples_section = f"{examples_text}\n" if examples_text else ""
+        examples_section = f"{examples_text}" if examples_text else ""
         
         # Construct the prompt
         prompt = f"""
@@ -105,11 +105,16 @@ The user is specifically interested in:
 
 The user is NOT interested in:
 {excluded_interests_text}
+
+EXAMPLES OF GOOD FILTERING DECISIONS BASED ON USER INTERESTS:
 {examples_section}
 ARTICLE TO EVALUATE:
-Title: {title}
-Source: {source}
-Content: {truncated_content}
+Title: ===========================================
+{title}
+===========================================
+Content: ===========================================
+{truncated_content}
+===========================================
 
 TASK:
 1. Identify the specific main topics covered in this article (be detailed and descriptive).

@@ -255,6 +255,102 @@ class JudgeApp:
         # If comparable_count is 0 (e.g., only validated summaries), agreement rate remains 0
 
         return stats
+        
+    def get_time_based_stats(self, use_case=None, days=30, interval='day'):
+        """
+        Get agreement statistics over time.
+        
+        Args:
+            use_case: Optional filter by use case
+            days: Number of days to include
+            interval: Time interval for grouping ('day', 'week', or 'month')
+            
+        Returns:
+            DataFrame with time-based statistics
+        """
+        # Get all evaluations for the period
+        all_evaluations = self.get_evaluations(use_case=use_case, days=days)
+        
+        # Filter for validated evaluations with content filter decisions
+        validated_evals = []
+        for eval_entry in all_evaluations:
+            if eval_entry.get('human_validated', False):
+                response = eval_entry.get('response', {})
+                human_decision = eval_entry.get('human_decision', None)
+                
+                # Only include evaluations with pass_filter and human_decision
+                if 'pass_filter' in response and human_decision is not None:
+                    validated_evals.append(eval_entry)
+        
+        if not validated_evals:
+            # Return empty DataFrame if no validated evaluations
+            return pd.DataFrame(columns=['date', 'agreement_rate', 'false_positives', 'false_negatives', 'total'])
+        
+        # Convert evaluations to DataFrame for time-based analysis
+        data = []
+        for eval_entry in validated_evals:
+            timestamp_str = eval_entry.get('timestamp', '')
+            if not timestamp_str:
+                continue
+                
+            try:
+                timestamp = datetime.fromisoformat(timestamp_str)
+                response = eval_entry.get('response', {})
+                model_decision = response.get('pass_filter', False)
+                human_decision = eval_entry.get('human_decision', False)
+                
+                # Determine agreement type
+                if model_decision == human_decision:
+                    agreement_type = 'agreement'
+                elif model_decision and not human_decision:
+                    agreement_type = 'false_positive'
+                else:
+                    agreement_type = 'false_negative'
+                
+                data.append({
+                    'timestamp': timestamp,
+                    'agreement_type': agreement_type
+                })
+            except ValueError:
+                # Skip entries with invalid timestamps
+                continue
+        
+        if not data:
+            # Return empty DataFrame if no valid data
+            return pd.DataFrame(columns=['date', 'agreement_rate', 'false_positives', 'false_negatives', 'total'])
+        
+        # Create DataFrame
+        df = pd.DataFrame(data)
+        
+        # Group by time interval
+        if interval == 'day':
+            df['date'] = df['timestamp'].dt.date
+        elif interval == 'week':
+            df['date'] = df['timestamp'].dt.to_period('W').dt.start_time.dt.date
+        else:  # month
+            df['date'] = df['timestamp'].dt.to_period('M').dt.start_time.dt.date
+        
+        # Count by date and agreement type
+        counts = pd.crosstab(df['date'], df['agreement_type'])
+        
+        # Ensure all columns exist
+        for col in ['agreement', 'false_positive', 'false_negative']:
+            if col not in counts.columns:
+                counts[col] = 0
+        
+        # Calculate totals and rates
+        counts['total'] = counts.sum(axis=1)
+        counts['agreement_rate'] = counts['agreement'] / counts['total']
+        counts['false_positives'] = counts['false_positive']
+        counts['false_negatives'] = counts['false_negative']
+        
+        # Reset index to make date a column
+        result = counts.reset_index()
+        
+        # Select and rename columns
+        result = result[['date', 'agreement_rate', 'false_positives', 'false_negatives', 'total']]
+        
+        return result
 
 
 def get_article_content(file_path):
@@ -700,7 +796,7 @@ def show_dashboard(judge_app):
     st.header("Evaluation Dashboard")
     
     # Filter controls
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         use_case = st.selectbox(
             "Filter by Use Case",
@@ -708,6 +804,11 @@ def show_dashboard(judge_app):
         )
     with col2:
         days = st.slider("Days to Include", 1, 90, 30)
+    with col3:
+        interval = st.selectbox(
+            "Time Interval",
+            ["day", "week", "month"]
+        )
     
     # Get filtered stats
     use_case_filter = None if use_case == "All" else use_case
@@ -720,6 +821,53 @@ def show_dashboard(judge_app):
     metrics_cols[2].metric("Agreement Rate", f"{stats['agreement_rate']:.2%}")
     metrics_cols[3].metric("False Positives", stats['false_positives'])
     metrics_cols[4].metric("False Negatives", stats['false_negatives'])
+    
+    # Get time-based stats for charts
+    time_stats = judge_app.get_time_based_stats(use_case=use_case_filter, days=days, interval=interval)
+    
+    # Display charts if we have data
+    if not time_stats.empty:
+        st.subheader(f"Stats Over Time (by {interval})")
+        
+        # Create tabs for different charts
+        tab1, tab2, tab3 = st.tabs(["Agreement Rate", "False Positives", "False Negatives"])
+        
+        with tab1:
+            # Agreement Rate chart
+            fig_agreement = px.bar(
+                time_stats, 
+                x='date', 
+                y='agreement_rate',
+                title='Agreement Rate Over Time',
+                labels={'date': 'Date', 'agreement_rate': 'Agreement Rate'},
+                color_discrete_sequence=['#1f77b4']
+            )
+            fig_agreement.update_layout(yaxis_tickformat='.0%')
+            st.plotly_chart(fig_agreement, use_container_width=True)
+        
+        with tab2:
+            # False Positives chart
+            fig_fp = px.bar(
+                time_stats, 
+                x='date', 
+                y='false_positives',
+                title='False Positives Over Time',
+                labels={'date': 'Date', 'false_positives': 'False Positives'},
+                color_discrete_sequence=['#ff7f0e']
+            )
+            st.plotly_chart(fig_fp, use_container_width=True)
+        
+        with tab3:
+            # False Negatives chart
+            fig_fn = px.bar(
+                time_stats, 
+                x='date', 
+                y='false_negatives',
+                title='False Negatives Over Time',
+                labels={'date': 'Date', 'false_negatives': 'False Negatives'},
+                color_discrete_sequence=['#d62728']
+            )
+            st.plotly_chart(fig_fn, use_container_width=True)
     
     # Show recent evaluations
     st.subheader("Recent Evaluations")

@@ -170,6 +170,10 @@ class LlmGateway:
                          additional_data: Dict[str, Any],
                          is_cached: bool) -> None:
         """Log the interaction to trace logs."""
+        # Skip logging if the response is from cache
+        if is_cached:
+            return
+            
         # Generate a log ID if not provided
         log_id = str(uuid.uuid4())
         

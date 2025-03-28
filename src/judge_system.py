@@ -270,8 +270,46 @@ class JudgeSystem:
             return disagreements
         else:
             return random.sample(disagreements, count)
+    
+    def get_agreement_examples(self, 
+                              use_case: str,
+                              count: int = 2,
+                              days: int = 90) -> List[Dict]:
+        """
+        Get examples where human and model evaluations agreed.
+        
+        Args:
+            use_case: Filter by use case (e.g., 'content_filter')
+            count: Number of examples to return
+            days: Look back this many days for examples
             
-    def get_feedback_examples(self, use_case: str, count: int = 2) -> str:
+        Returns:
+            list: Examples with human-model agreement
+        """
+        # Get human-validated evaluations for the use case
+        validated_evals = self.get_evaluations(
+            use_case=use_case,
+            days=days,
+            human_validated_only=True
+        )
+        
+        # Filter for agreements
+        agreements = []
+        for eval_entry in validated_evals:
+            model_decision = eval_entry.get('response', {}).get('pass_filter', False)
+            human_decision = eval_entry.get('human_decision', False)
+            
+            # If there's an agreement
+            if model_decision == human_decision:
+                agreements.append(eval_entry)
+        
+        # Randomly select examples
+        if len(agreements) <= count:
+            return agreements
+        else:
+            return random.sample(agreements, count)
+            
+    def get_feedback_examples(self, use_case: str, count: int = 8) -> str:
         """
         Get formatted feedback examples for prompts.
         
@@ -282,14 +320,30 @@ class JudgeSystem:
         Returns:
             str: Formatted feedback examples text
         """
-        # Get disagreement examples
-        examples = self.get_disagreement_examples(use_case=use_case, count=count)
+        # Calculate counts for disagreement and agreement examples (80/20 split)
+        disagreement_count = int(count * 0.8)
+        agreement_count = count - disagreement_count
+        
+        # Ensure at least one of each if count > 1
+        if count > 1 and disagreement_count == 0:
+            disagreement_count = 1
+            agreement_count = count - 1
+        elif count > 1 and agreement_count == 0:
+            agreement_count = 1
+            disagreement_count = count - 1
+            
+        # Get examples
+        disagreement_examples = self.get_disagreement_examples(use_case=use_case, count=disagreement_count)
+        agreement_examples = self.get_agreement_examples(use_case=use_case, count=agreement_count)
+        
+        # Combine examples
+        examples = disagreement_examples + agreement_examples
         
         if not examples:
             return ""
             
         # Format examples for inclusion in prompts
-        examples_text = "\nHUMAN FEEDBACK EXAMPLES (where previous model evaluations were incorrect):\n"
+        examples_text = "\nHUMAN FEEDBACK EXAMPLES (including both correct and incorrect model evaluations):\n"
         
         for i, example in enumerate(examples, 1):
             try:
@@ -298,10 +352,11 @@ class JudgeSystem:
                 # Update to use the new response field structure
                 model_result = example.get('response', {})
                 model_decision = model_result.get('pass_filter', False)
+                human_decision = example.get('human_decision', False)
                 
                 feedback = HumanFeedback(
                     eval_id=example.get('id', str(uuid.uuid4())),
-                    human_decision=example.get('human_decision', False),
+                    human_decision=human_decision,
                     model_decision=model_decision,
                     human_notes=example.get('human_notes', ''),
                     title=item_meta.get('title', 'Unknown')
@@ -310,11 +365,20 @@ class JudgeSystem:
                 examples_text += f"Example {i}:\n"
                 examples_text += feedback.format_for_prompt()
                 
+                # Get content snippet and limit to 250 words
                 content_snippet = example.get('additional_data', {}).get('content_snippet', '')
                 if content_snippet:
+                    # Limit to 250 words
+                    words = content_snippet.split()
+                    if len(words) > 250:
+                        content_snippet = ' '.join(words[:250]) + '...'
                     examples_text += f"Content snippet: {content_snippet}\n"
                 
-                examples_text += f"Reason for model error: The model failed to correctly assess whether this article matched the user's interests.\n\n"
+                # Add reason for model correctness/error
+                if model_decision == human_decision:
+                    examples_text += f"Model assessment: The model correctly assessed whether this article matched the user's interests.\n\n"
+                else:
+                    examples_text += f"Model assessment: The model failed to correctly assess whether this article matched the user's interests.\n\n"
             except Exception as e:
                 logger.error(f"Error formatting feedback example: {e}")
         

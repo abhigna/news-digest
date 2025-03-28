@@ -53,7 +53,7 @@ SUMMARIZATION_CONFIG = {
     "max_summary_length": 150,
     "llm_cache": "llm_cache/summaries",
     "use_cache": True,
-    "include_feedback_examples": True,
+    # TODO: "include_feedback_examples": True,
     "examples_count": 2
 }
 
@@ -76,12 +76,12 @@ LOGGING_CONFIG = {
 JUDGE_CONFIG = {
     "llm_trace_logs": "llm_trace_logs",
     "default_days_to_display": 30,
-    "include_feedback_examples": True,
-    "examples_count": 2,
     "human_feedback_file": "human_feedback.json"
 }
 
 FILTERING_CONFIG = {
     "max_articles_per_digest": 10,  # Maximum number of articles to include
-    "llm_cache": "llm_cache/filtering"  # Keep cache directory setting
+    "llm_cache": "llm_cache/filtering",  # Keep cache directory setting
+    "include_feedback_examples": True,
+    "examples_count": 10,
 }
