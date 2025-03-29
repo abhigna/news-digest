@@ -43,13 +43,20 @@ class EmailSender:
             with open(markdown_file, 'r', encoding='utf-8') as f:
                 md_content = f.read()
             
-            # Convert markdown to HTML
+            # Convert markdown to HTML with enhanced extensions
             html_content = markdown.markdown(
                 md_content, 
-                extensions=['extra', 'codehilite', 'sane_lists']
+                extensions=[
+                    'extra',
+                    'codehilite',
+                    'sane_lists',
+                    'nl2br',  # Convert newlines to <br> tags
+                    'tables'  # Better table support
+                ],
+                output_format='html5'  # Use HTML5 output format
             )
             
-            # Add some basic styling
+            # Add improved styling with specific list styling
             styled_html = f"""
             <!DOCTYPE html>
             <html>
@@ -63,15 +70,49 @@ class EmailSender:
                         max-width: 800px; 
                         margin: 0 auto; 
                         padding: 20px; 
+                        color: #333;
                     }}
-                    h1, h2, h3 {{ color: #333; }}
-                    a {{ color: #0066cc; }}
+                    h1, h2, h3 {{ color: #333; margin-top: 1.5em; margin-bottom: 0.5em; }}
+                    a {{ color: #0066cc; text-decoration: none; }}
+                    a:hover {{ text-decoration: underline; }}
                     code {{ background-color: #f5f5f5; padding: 2px 4px; border-radius: 4px; }}
                     hr {{ border: 0; border-top: 1px solid #eee; margin: 20px 0; }}
+                    
+                    /* Improved list styling */
+                    ul, ol {{ 
+                        padding-left: 20px; 
+                        margin: 1em 0; 
+                    }}
+                    ul li, ol li {{ 
+                        margin-bottom: 0.5em; 
+                        padding-left: 5px;
+                    }}
+                    ul {{ 
+                        list-style-type: disc; 
+                    }}
+                    ul ul {{ 
+                        list-style-type: circle; 
+                    }}
+                    ul ul ul {{ 
+                        list-style-type: square; 
+                    }}
+                    
+                    /* Specific email client fixes */
+                    /* For Outlook */
+                    .outlook-list {{
+                        margin-left: 30px !important;
+                    }}
+                    /* For Gmail */
+                    .gmail-fix {{
+                        display: block !important;
+                    }}
                 </style>
             </head>
             <body>
-                {html_content}
+                <!-- Email client specific wrapper for lists -->
+                <div class="gmail-fix outlook-list">
+                    {html_content}
+                </div>
             </body>
             </html>
             """
@@ -124,4 +165,4 @@ class EmailSender:
             logger.error(f"Error sending email: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            return False 
+            return False
