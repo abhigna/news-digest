@@ -211,10 +211,11 @@ class DigestCompiler:
         
         # Create output filename
         current_date = datetime.now().strftime("%Y-%m-%d")
-        output_filename = self.config['output_file_format'].format(date=current_date)
+        output_filename = os.path.join("digests", self.config['output_file_format'].format(date=current_date))
         
         # Write to file
         try:
+            os.makedirs("digests", exist_ok=True)
             with open(output_filename, 'w', encoding='utf-8') as f:
                 f.write(digest_content)
             

@@ -276,7 +276,7 @@ def main():
             # If no digest was compiled in this run, find the latest one
             if not digest_file:
                 import glob
-                digest_files = glob.glob("digest_*.md")
+                digest_files = glob.glob("digests/digest_*.md")
                 if digest_files:
                     digest_file = max(digest_files, key=os.path.getctime)
                     logger.info(f"Using latest digest file: {digest_file}")
