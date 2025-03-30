@@ -926,6 +926,7 @@ def show_review_page(judge_app):
         use_case = st.selectbox(
             "Filter by Use Case",
             ["All", "content_filter", "content_summarizer"],
+            index=1,  # Default to "content_filter"
             key="review_use_case"
         )
     with col2:
@@ -950,6 +951,9 @@ def show_review_page(judge_app):
     if not evaluations:
         st.info("No evaluations found with the current filters.")
         return
+    
+    # Sort evaluations by timestamp in descending order (most recent first)
+    evaluations = sorted(evaluations, key=lambda e: e.get('timestamp', ''), reverse=True)
     
     # Create a selection list of titles with model decision
     titles = []
